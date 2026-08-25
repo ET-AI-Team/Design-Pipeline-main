@@ -1,0 +1,5 @@
+-- AlterEnum
+ALTER TYPE "JobStatus" ADD VALUE 'BASE_LAYER_CLASSIFYING' AFTER 'QUEUED';
+
+-- AlterTable
+ALTER TABLE "Job" ADD COLUMN "baseLayerSpecJson" JSONB;

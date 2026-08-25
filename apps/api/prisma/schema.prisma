@@ -1,0 +1,134 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Supabase-specific: migrations must bypass the connection pooler.
+  directUrl = env("DIRECT_URL")
+}
+
+enum JobStatus {
+  QUEUED
+  BASE_LAYER_CLASSIFYING
+  BASE_ASSET_GENERATING
+  BASE_ASSET_SCORING
+  LOGO_PLACEMENT_DETECTING
+  LOGO_COMPOSITING
+  POSTER_GENERATING
+  POSTER_SCORING
+  AWAITING_APPROVAL
+  DIMENSION_EXPANDING
+  COMPLETE
+  NEEDS_ATTENTION
+  REJECTED
+}
+
+enum StageAttemptResult {
+  PASS
+  RETRY
+  ESCALATED
+}
+
+enum DimensionStatus {
+  PENDING
+  GENERATING
+  SCORING
+  DELIVERED
+  NEEDS_ATTENTION
+}
+
+model Job {
+  id            String    @id @default(uuid())
+  name          String? // user-editable display name - falls back to the prompt in the UI when unset
+  status        JobStatus @default(QUEUED)
+  reference1Url String
+  reference2Url String
+  logoUrl       String
+  prompt        String
+  baseAssetUrl  String?
+  posterUrl     String?
+  // Extracted once (analyzeReferenceStyle against reference2Url) and
+  // reused by logo_composite (backdrop panel) and poster (text layer) -
+  // both need to agree on the SAME extracted layout, and re-extracting
+  // per stage/retry both costs more and risks the two disagreeing.
+  styleSpecJson Json?
+  // Extracted once by base_layer_classification (GPT-4.1 vision against
+  // reference2Url), before base_asset ever runs. base_asset's buildPrompt
+  // reads this to replace the old hardcoded "subject right-two-thirds,
+  // clean left-third" assumption with the reference's actual layout
+  // archetype. Same caching discipline as styleSpecJson: written once on
+  // first PASS, reused on every base_asset content-quality retry - never
+  // re-derived by base_asset itself.
+  baseLayerSpecJson Json?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  stageAttempts StageAttempt[]
+  dimensionJobs DimensionJob[]
+  approvalLog   ApprovalLog?
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model StageAttempt {
+  id            String              @id @default(uuid())
+  jobId         String
+  job           Job                 @relation(fields: [jobId], references: [id])
+  stage         String
+  attemptNumber Int
+  modelUsed     String
+  latencyMs     Int
+  costInr       Decimal
+  qaScore       Decimal?
+  // Not in the original Data Model doc: the logo_detection stage's
+  // detected clean-zone box, so the deterministic logo_composite stage
+  // (Phase 6.3) can read back the real AI-detected position instead of
+  // silently falling through to a hardcoded default. Only ever populated
+  // when stage === "logo_detection".
+  boundingBoxJson Json?
+  // Layered Text-Composition Architecture (info.md): only ever populated
+  // when stage === "poster" - one entry per layer (headline_subtext,
+  // cta, trust_list) the poster stage generated, so the dashboard can
+  // render a per-layer pass/fail checklist instead of parsing prose out
+  // of qaReasoning.
+  layerBreakdownJson Json?
+  // Also not in the original Data Model doc: every attempt's generated
+  // image was uploaded to Cloudinary regardless of pass/fail, but its
+  // URL was only ever kept if the attempt happened to be the one that
+  // passed - failed and retried attempts were uploaded then effectively
+  // lost, unretrievable via the API. This is what PRD §7's "intermediate
+  // and rejected attempts must be retained AND retrievable" actually
+  // requires - "retained" alone (the Cloudinary upload) wasn't enough.
+  assetUrl      String?
+  qaReasoning   String?
+  result        StageAttemptResult
+  startedAt     DateTime
+  completedAt   DateTime?
+
+  @@unique([jobId, stage, attemptNumber])
+  @@index([jobId])
+}
+
+model DimensionJob {
+  id        String          @id @default(uuid())
+  jobId     String
+  job       Job             @relation(fields: [jobId], references: [id])
+  dimension String
+  status    DimensionStatus @default(PENDING)
+  assetUrl  String?
+
+  @@index([jobId])
+}
+
+model ApprovalLog {
+  id        String   @id @default(uuid())
+  jobId     String   @unique
+  job       Job      @relation(fields: [jobId], references: [id])
+  decision  String
+  comment   String?
+  decidedAt DateTime
+}
