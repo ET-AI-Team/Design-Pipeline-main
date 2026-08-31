@@ -35,6 +35,18 @@ interface GenerateAndScoreParams {
    *  stages legitimately generate non-square output and must never have
    *  this applied. */
   enforceSquare?: boolean;
+  /** Real defect found manually testing dimension recomposition directly
+   *  against Gemini: even when the prompt explicitly states an exact
+   *  target pixel size, the model routinely returns a different
+   *  resolution at the same aspect ratio (e.g. 768x1376 for a requested
+   *  1080x1920) - the same "never trust the provider to hit the exact
+   *  size it was asked for" lesson `enforceSquareCanvas` above and
+   *  poster-text-edit.ts's `pickEditSize` backstop already learned
+   *  separately. `fit: 'cover'` (crop, never stretch) so a slightly
+   *  off-ratio return is cropped to match rather than distorted. Only
+   *  ever set by the dimension_* stages - base_asset uses
+   *  `enforceSquare` instead. */
+  resizeToExact?: { width: number; height: number };
 }
 
 /** Center-crops to a square if the generated image isn't already one -
@@ -50,6 +62,16 @@ export async function enforceSquareCanvas(buffer: Buffer): Promise<Buffer> {
   const left = Math.round((width - size) / 2);
   const top = Math.round((height - size) / 2);
   return sharp(buffer).extract({ left, top, width: size, height: size }).png().toBuffer();
+}
+
+/** Resizes to an exact target size if the generated image isn't already
+ *  that size - `fit: 'cover'` crops any overflow rather than stretching,
+ *  the same never-distort principle `enforceSquareCanvas` above uses.
+ *  A no-op (returns the same buffer) when the image already matches. */
+export async function resizeToExactSize(buffer: Buffer, target: { width: number; height: number }): Promise<Buffer> {
+  const { width, height } = await sharp(buffer).metadata();
+  if (width === target.width && height === target.height) return buffer;
+  return sharp(buffer).resize(target.width, target.height, { fit: 'cover' }).png().toBuffer();
 }
 
 /**
@@ -86,7 +108,8 @@ export async function generateAndScore(params: GenerateAndScoreParams): Promise<
   });
 
   const rawBuffer = Buffer.from(generation.imageUrl, 'base64');
-  const buffer = params.enforceSquare ? await enforceSquareCanvas(rawBuffer) : rawBuffer;
+  let buffer = params.enforceSquare ? await enforceSquareCanvas(rawBuffer) : rawBuffer;
+  if (params.resizeToExact) buffer = await resizeToExactSize(buffer, params.resizeToExact);
   const upload = await uploadToCloudinary(buffer, { folder: params.cloudinaryFolder });
 
   emitStatusChanged(params.jobId, params.scoringStatus);

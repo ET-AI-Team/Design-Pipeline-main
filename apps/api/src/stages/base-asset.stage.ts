@@ -91,7 +91,8 @@ Two reference images are attached below - match their actual photographic style 
 - Framing: ${p.photoStyle.framing}
 
 Composition: compose this photo so it naturally reads like the reference's own composition - ${p.compositionGuide}
-${p.backgroundTreatment ? `Background/design treatment: the reference also uses a design treatment that isn't part of the photo's natural content - replicate it directly in this photo: ${p.backgroundTreatment}. If any part of that description itself refers to letters, words, numbers, or a wordmark, ignore that part entirely - replicate only its color, shape, or texture, never any letterform; this image must still contain absolutely no text of any kind.` : ''}
+${p.backgroundTreatment ? `Background/design treatment: the reference also uses a design treatment that isn't part of the photo's natural content - replicate it directly in this photo: ${p.backgroundTreatment}. If any part of that description itself refers to letters, words, numbers, or a wordmark, ignore that part entirely - replicate only its color, shape, or texture, never any letterform; this image must still contain absolutely no text of any kind.
+IMPORTANT, a real defect found live: the attached reference images themselves may visually show real, legible repeated lettering as part of this exact design treatment (e.g. a word tiled across a color panel). Do NOT copy that lettering just because you can see it in the reference - a text-generation model repeating the same word many times across one image reliably produces drifting, malformed, half-legible letterforms (duplicated or dropped letters, inconsistent shapes between repeats), which is worse than having none at all. Render this treatment's color/shape/panel only, completely flat and unlettered, even though the reference shows text there - the real, correctly-formed wordmark is added by a separate, more reliable step later in this pipeline, never by you here.` : ''}
 
 Subject: ${p.subject}
 Mood: ${p.mood}
@@ -117,7 +118,22 @@ REMINDER: ${p.negativeConstraints.join(' ')} Avoid at all costs: ${p.realismBloc
  *  This version is dynamic per job (same input, same shape as
  *  buildBaseAssetPrompt above) and judges against that job's own real
  *  situational target instead of a blank-slate assumption. */
-export function buildBaseAssetRubric(spec: BaseLayerSpec): string {
+/**
+ * Real defect found live: this rubric only ever judged general realism/
+ * composition against the derived style spec - it never once looked at
+ * the actual campaign brief, so it had no way to notice the generated
+ * photo quietly dropped something the brief explicitly asked for (a
+ * named subject, a specific detail). A real job's brief asked for an
+ * elderly grandmother and race bibs on every runner; the generated photo
+ * had neither, and this rubric scored it 9/PASS anyway because
+ * composition and lighting looked fine. campaignBrief is now passed
+ * through so this can check for that class of miss directly - scoped
+ * narrowly to concrete, unambiguous nouns the brief names (a person/role,
+ * a specific visible detail, an object), never mood/style language
+ * ("energetic", "cinematic", "premium") which is inherently subjective
+ * and must not become a literal pass/fail checklist item.
+ */
+export function buildBaseAssetRubric(spec: BaseLayerSpec, campaignBrief: string): string {
   return `Score this base image out of 10 for composition and realism. Two reference images are attached - judge this image against what THOSE references actually look like, not a generic assumption. If the references (and the style notes below) show a deliberately stylized, graphic, duotone, or non-strictly-photorealistic treatment, judge realism/coherence against THAT target, not against "does it look like an unedited photograph."
 
 Style this generation was directed to match:
@@ -127,6 +143,13 @@ ${spec.backgroundTreatment ? `- Background/design treatment: ${spec.backgroundTr
 - Lighting: ${spec.photoStyle.lighting}
 - Setting: ${spec.photoStyle.setting}
 - Framing: ${spec.photoStyle.framing}
+
+CONTENT CHECKLIST - separate from the style judgment above, a real check this pipeline used to skip entirely: the original campaign brief is below. Read it and list out every concrete, unambiguous, literal requirement it names - a specific person or role (e.g. "an elderly grandmother," "a child"), an explicit visible detail or prop (e.g. "wearing race bibs," "holding a coffee cup"), a specific countable number of subjects if one is explicitly stated. Do NOT include mood/style/atmosphere language as a checklist item (e.g. "energetic," "premium," "cinematic," "warm tone") - those are judged by the style comparison above, not here, and are inherently subjective. For each concrete item on your list, look at the actual image and confirm whether it is genuinely, visibly present. If ANY concrete, explicitly-named requirement is missing from the image, this is an automatic fail: score 4 or lower, and say exactly which requirement is missing. If every concrete requirement is satisfied, this checklist does not reduce the score at all.
+
+Campaign brief:
+"""
+${campaignBrief}
+"""
 
 TEXT RULE - read carefully, this is not a blanket ban: this pipeline composites all real campaign copy (headline, CTA, trust points, prices, promo badges) onto this photo in a SEPARATE later stage, so text that reads like fabricated ad-copy - a headline-style phrase, a call-to-action, a promotional line, a price, a brand wordmark not present in the references - is still an automatic fail: score 3 or lower, and say exactly what text you found and why it reads as ad-copy.
 However, authentic incidental environmental text - real signage, carved inscriptions on a real monument or building, distant or blurred lettering that is a natural part of an honest real-world scene, consistent with the attached reference images and the style notes above - is NOT a failure and must not be scored down for being present, exactly as it would appear in an actual unedited photograph of that real place or object. If you see text and are unsure which category it falls into, say so explicitly in your reasoning and judge based on whether it looks like it was composited/rendered as design copy versus whether it looks like a physically real part of the scene.`;
@@ -193,7 +216,7 @@ registerStage({
       // logo/text placement decisions) depends on this canvas actually
       // being square.
       enforceSquare: true,
-      rubricPrompt: buildBaseAssetRubric(spec),
+      rubricPrompt: buildBaseAssetRubric(spec, job.prompt),
     });
   },
 });

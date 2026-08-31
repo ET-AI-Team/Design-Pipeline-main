@@ -424,7 +424,24 @@ function styleInstructionsBlock(style: PosterStyleSpec, canvasW: number, canvasH
   const boundary = textColumnBoundary(style, canvasW);
   const textBoundaryLine = `HARD BOUNDARY: all text and design elements (headline, subtext, CTA, trust list) must stay entirely within the left ${boundary.pctLabel} of canvas width (~${boundary.px}px from the left edge, measured against this exact canvas). Do not let any letter, word, or element extend past this line, even if it means a smaller font or an extra line - the photo's subject occupies the space to the right of this boundary and must never be touched, crowded, or covered.`;
 
-  return [textBoundaryLine, ...style.elementOrder.flatMap((name) => blocks[name] ?? [])].join('\n');
+  // Rendered first, behind every other element below - this is a
+  // background-layer TEXTURE, not a discrete line of copy someone reads
+  // (unlike every other text block above, it has no single position; it
+  // repeats/tiles across a region). Real defect this fixes: this design
+  // device previously had nowhere to go in the extracted style at all
+  // (excluded from base_asset's non-text-only backgroundTreatment,
+  // didn't fit otherElements' single-position chip model) and was
+  // silently dropped, so a reference's single most distinctive visual
+  // signature never reached the generated poster.
+  const backgroundPatternLines: string[] = [];
+  if (style.backgroundPattern.present && style.backgroundPattern.word) {
+    backgroundPatternLines.push(
+      `Background pattern (render this FIRST, as a background layer behind the photo's subject and behind every other text element below - it is decorative texture, not copy meant to be individually read): the word "${style.backgroundPattern.word}" repeated/tiled across the composition.${style.backgroundPattern.containerDescription ? ` Container: ${style.backgroundPattern.containerDescription}.` : ''} Typographic treatment: ${style.backgroundPattern.styleDescription}. ${colorInstruction(style.backgroundPattern.color)}, rendered at roughly ${pct(style.backgroundPattern.opacityRatio)} opacity (most of these read as faded or outline-only, not solid). Do not let this repeated word read as a legible headline or CTA - it is background texture only, and must never cover or reduce the legibility of the actual headline/subtext/CTA/trust-list text.
+  IMPORTANT, a real defect found live: the color panel this texture belongs on may already exist in the photo you were given, but an earlier generation step is unreliable at repeating the same word legibly and may have left it blank, or left a garbled/malformed attempt there instead (drifting letterforms, duplicated or dropped letters, inconsistent shapes between repeats). Do not preserve a broken attempt just because "something is already there" - if the existing panel has no lettering, or has malformed/illegible lettering, paint over that area completely with a single, cleanly and consistently repeated instance of the real word above. Every repeat of the word must use the exact same letterforms as every other repeat - do not let it drift or vary from one repetition to the next.`
+    );
+  }
+
+  return [textBoundaryLine, ...backgroundPatternLines, ...style.elementOrder.flatMap((name) => blocks[name] ?? [])].join('\n');
 }
 
 export interface FullContextEditParams {

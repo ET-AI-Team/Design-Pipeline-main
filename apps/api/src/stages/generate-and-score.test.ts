@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import sharp from 'sharp';
-import { enforceSquareCanvas } from './generate-and-score';
+import { enforceSquareCanvas, resizeToExactSize } from './generate-and-score';
 
 async function makePng(width: number, height: number): Promise<Buffer> {
   const buf = Buffer.alloc(width * height * 3, 128);
@@ -52,5 +52,21 @@ describe('enforceSquareCanvas', () => {
     expect(data[centerIdx]).toBe(255);
     // The corner marker (near original x=5) should have been cropped away for a 1000x500 -> 500x500 center crop (left offset = 250).
     expect(data[0]).toBe(0);
+  });
+});
+
+describe('resizeToExactSize', () => {
+  it('real defect found live: crops (never stretches) a dimension recomposition that came back a different resolution than requested (768x1376 for a requested 1080x1920)', async () => {
+    const wrong = await makePng(768, 1376);
+    const result = await resizeToExactSize(wrong, { width: 1080, height: 1920 });
+    const { width, height } = await sharp(result).metadata();
+    expect(width).toBe(1080);
+    expect(height).toBe(1920);
+  });
+
+  it('is a no-op when the image already matches the target size exactly', async () => {
+    const exact = await makePng(1080, 1920);
+    const result = await resizeToExactSize(exact, { width: 1080, height: 1920 });
+    expect(result).toBe(exact); // same buffer reference - genuinely skipped, not just visually identical
   });
 });

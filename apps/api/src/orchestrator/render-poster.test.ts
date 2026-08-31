@@ -33,6 +33,7 @@ const CACHED_STYLE: PosterStyleSpec = {
   },
   textColumnWidthRatio: 0.5,
   centerXRatio: 0.29,
+  backgroundPattern: { present: false, word: '', containerDescription: '', styleDescription: '', color: { type: 'solid', color: '#fff' }, opacityRatio: 0 },
   otherElements: [],
   elementOrder: ['headline', 'cta'],
 };

@@ -224,6 +224,14 @@ function clampStyle(raw: PosterStyleSpec): PosterStyleSpec {
     centerXRatio: Number.isFinite(raw.centerXRatio)
       ? clamp(raw.centerXRatio, 0.15, 0.85)
       : clamp((Number.isFinite(raw.marginXRatio) ? raw.marginXRatio : 0.04) + (Number.isFinite(raw.textColumnWidthRatio) ? raw.textColumnWidthRatio : 0.35) / 2, 0.15, 0.85),
+    backgroundPattern: {
+      present: !!raw.backgroundPattern?.present,
+      word: nonEmptyString(raw.backgroundPattern?.word, ''),
+      containerDescription: raw.backgroundPattern?.containerDescription ?? '',
+      styleDescription: nonEmptyString(raw.backgroundPattern?.styleDescription, 'bold outlined display lettering'),
+      color: clampColorSpec(raw.backgroundPattern?.color, '#ffffff'),
+      opacityRatio: clamp(raw.backgroundPattern?.opacityRatio ?? NaN, 0, 1),
+    },
     otherElements,
     elementOrder,
   };

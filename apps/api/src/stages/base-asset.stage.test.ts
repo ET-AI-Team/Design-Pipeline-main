@@ -24,6 +24,8 @@ function mockJob(baseLayerSpecJson: BaseLayerSpec | null): Job {
   } as Job;
 }
 
+const MOCK_BRIEF = 'mock campaign brief, ten-plus characters';
+
 const CACHED_SPEC: BaseLayerSpec = {
   compositionGuide:
     'The subjects fill the right two-thirds of the frame, walking together along a path; the left third of the frame is a naturally clean, softly out-of-focus continuation of the same path, reserved as visual breathing room.',
@@ -65,6 +67,14 @@ describe('base_asset buildPrompt - reference-driven composition', () => {
 
     const promptWithout = stage.buildPrompt(mockJob(CACHED_SPEC)); // backgroundTreatment: ''
     expect(promptWithout).not.toContain('Background/design treatment:');
+  });
+
+  it('real bug found live: explicitly warns against copying legible repeated lettering visible in the attached reference images, not just a generic "no text" rule - a real job kept drawing a drifting, malformed repeat of a wordmark straight off the reference despite the generic no-text constraint already being present and bookended', () => {
+    const withTreatment: BaseLayerSpec = { ...CACHED_SPEC, backgroundTreatment: 'a diagonal yellow panel with a repeated wordmark overlay' };
+    const prompt = stage.buildPrompt(mockJob(withTreatment));
+    expect(prompt).toMatch(/reference images themselves may visually show real, legible repeated lettering/);
+    expect(prompt).toMatch(/drifting, malformed, half-legible letterforms/);
+    expect(prompt).toContain('completely flat and unlettered');
   });
 
   it('never re-derives the spec on a content-quality retry - buildPrompt is synchronous and reads only the cached job field', () => {
@@ -112,34 +122,47 @@ describe('base_asset buildPrompt - reference-driven composition', () => {
 
 describe('buildBaseAssetRubric - situational QA, not a fixed blanket rule', () => {
   it('embeds the same style/composition context the generation prompt used, not a blank slate', () => {
-    const rubric = buildBaseAssetRubric(CACHED_SPEC);
+    const rubric = buildBaseAssetRubric(CACHED_SPEC, MOCK_BRIEF);
     expect(rubric).toContain('The subjects fill the right two-thirds of the frame');
     expect(rubric).toContain('warm golden-hour tones, cream highlights');
     expect(rubric).toContain('soft directional golden-hour sunlight');
   });
 
   it('real bug found live: still hard-fails fabricated ad-copy-style text', () => {
-    const rubric = buildBaseAssetRubric(CACHED_SPEC);
+    const rubric = buildBaseAssetRubric(CACHED_SPEC, MOCK_BRIEF);
     expect(rubric).toContain('automatic fail');
     expect(rubric).toMatch(/headline-style phrase.*call-to-action.*promotional line/);
   });
 
   it('real bug found live: no longer penalizes authentic incidental environmental text (e.g. a real monument\'s own carved inscriptions)', () => {
-    const rubric = buildBaseAssetRubric(CACHED_SPEC);
+    const rubric = buildBaseAssetRubric(CACHED_SPEC, MOCK_BRIEF);
     expect(rubric).toContain('authentic incidental environmental text');
     expect(rubric).toContain('carved inscriptions on a real monument or building');
     expect(rubric).toContain('is NOT a failure');
   });
 
   it('real bug found live: judges realism against the reference\'s own actual treatment, not a generic photorealism bar', () => {
-    const rubric = buildBaseAssetRubric(CACHED_SPEC);
+    const rubric = buildBaseAssetRubric(CACHED_SPEC, MOCK_BRIEF);
     expect(rubric).toContain('judge this image against what THOSE references actually look like');
     expect(rubric).toContain('not against "does it look like an unedited photograph."');
   });
 
   it('embeds the background treatment when present, omits the line when absent - same as the generation prompt', () => {
     const withTreatment: BaseLayerSpec = { ...CACHED_SPEC, backgroundTreatment: 'a soft cream gradient panel behind the subject' };
-    expect(buildBaseAssetRubric(withTreatment)).toContain('a soft cream gradient panel behind the subject');
-    expect(buildBaseAssetRubric(CACHED_SPEC)).not.toContain('Background/design treatment:');
+    expect(buildBaseAssetRubric(withTreatment, MOCK_BRIEF)).toContain('a soft cream gradient panel behind the subject');
+    expect(buildBaseAssetRubric(CACHED_SPEC, MOCK_BRIEF)).not.toContain('Background/design treatment:');
+  });
+
+  it('real bug found live: now embeds the actual campaign brief so a checklist can verify explicitly requested content actually rendered - previously this rubric only ever judged style/composition and had no way to notice a requested subject (e.g. a grandmother, race bibs) was silently dropped', () => {
+    const brief = 'Show an elderly grandmother and grandfather jogging together, both wearing race bibs.';
+    const rubric = buildBaseAssetRubric(CACHED_SPEC, brief);
+    expect(rubric).toContain(brief);
+    expect(rubric).toContain('CONTENT CHECKLIST');
+    expect(rubric).toContain('automatic fail');
+  });
+
+  it('tells the judge to ignore mood/style language as a checklist item, not just style comparison', () => {
+    const rubric = buildBaseAssetRubric(CACHED_SPEC, MOCK_BRIEF);
+    expect(rubric).toMatch(/do not include mood\/style\/atmosphere language as a checklist item/i);
   });
 });

@@ -1,6 +1,11 @@
 import { createHttpClient } from '../lib/http-client';
 
-const gemini = createHttpClient('https://generativelanguage.googleapis.com/v1beta');
+// Exported (not module-private) so tests can override `.defaults.adapter`
+// to simulate a hung/never-resolving request, the same technique
+// http-client.test.ts already uses to simulate 429/5xx responses -
+// necessary to actually verify the timeout/AbortController wiring below
+// fires, rather than just trusting it reads correctly.
+export const gemini = createHttpClient('https://generativelanguage.googleapis.com/v1beta');
 
 export interface ReferenceImage {
   url: string;
@@ -20,6 +25,10 @@ export interface GenerateImageParams {
   prompt: string;
   model: string; // e.g. process.env.GEMINI_FLASH_MODEL or GEMINI_PRO_MODEL
   referenceImages?: ReferenceImage[];
+  /** Overrides GENERATE_TIMEOUT_MS below - production code never sets
+   *  this (real generations legitimately take up to ~5min); exists so
+   *  tests can simulate a hang without a real 300s wait. */
+  timeoutMs?: number;
 }
 
 export interface GenerateImageResult {
@@ -36,6 +45,33 @@ const MODEL_COST_INR: Record<string, number> = {
   'gemini-3-pro-image': 11.7, // NFR §4 Scenario A baseline
 };
 
+// Real bug found live: axios's own `timeout` (createHttpClient's default
+// 60s) does NOT reliably abort a call under Bun's http adapter - this
+// pipeline already discovered the exact same failure mode once before,
+// for openai.client.ts's editPosterImage(), where a real request hung
+// indefinitely with zero error or retry logged despite the axios
+// timeout supposedly being in effect. AbortController is a second,
+// independent enforcement mechanism that doesn't depend on axios/Bun's
+// internal socket-timeout wiring - kept alongside `timeout` (belt-and-
+// suspenders) rather than replacing it, since which one actually fires
+// first doesn't matter, only that ONE of them reliably does. Confirmed
+// live: three separate base_asset generations hung forever with no
+// resolve/reject and zero open connection to Gemini's API at the OS
+// socket level (checked via lsof) - the network exchange had already
+// finished, only the JS-level promise never settled.
+//
+// 300s, not editPosterImage's 120s: stalled-job-config.ts's own comment
+// records real observed base_asset/poster latencies up to 286s (that's
+// the exact reason lockDuration was set to 300s - "well past every
+// observed real latency, with margin"). A 120s timeout here would abort
+// genuinely slow-but-legitimate calls, not just hung ones, so this
+// reuses that same already-vetted 300s figure rather than inventing a
+// new number - it's an independent safety net from BullMQ's stalled
+// detection (this catches "promise never settles despite the process
+// being alive"; that catches "the worker process itself died"), so
+// there's no requirement that one fire strictly before the other.
+const GENERATE_TIMEOUT_MS = 300_000;
+
 export async function generateImage(params: GenerateImageParams): Promise<GenerateImageResult> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY is not configured');
@@ -48,11 +84,19 @@ export async function generateImage(params: GenerateImageParams): Promise<Genera
     parts.push({ file_data: { file_uri: ref.url } });
   }
 
-  const response = await gemini.post(
-    `/models/${params.model}:generateContent`,
-    { contents: [{ parts }] },
-    { params: { key: apiKey } }
-  );
+  const timeoutMs = params.timeoutMs ?? GENERATE_TIMEOUT_MS;
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => abortController.abort(), timeoutMs);
+  let response;
+  try {
+    response = await gemini.post(
+      `/models/${params.model}:generateContent`,
+      { contents: [{ parts }] },
+      { params: { key: apiKey }, timeout: timeoutMs, signal: abortController.signal }
+    );
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 
   const latencyMs = Date.now() - startedAt;
   // The Gemini API's JSON response uses camelCase (inlineData, mimeType),

@@ -83,6 +83,7 @@ const STYLE: PosterStyleSpec = {
   },
   textColumnWidthRatio: 0.35,
   centerXRatio: 0.215, // matches marginXRatio(0.04) + textColumnWidthRatio(0.35)/2, for tests that predate the direct-read field
+  backgroundPattern: { present: false, word: '', containerDescription: '', styleDescription: '', color: { type: 'solid', color: '#fff' }, opacityRatio: 0 },
   otherElements: [],
   elementOrder: ['headline', 'subtext', 'cta', 'trustList'],
 };
@@ -187,6 +188,30 @@ describe('buildFullContextEditPrompt', () => {
 
     const withTreatment = buildFullContextEditPrompt({ ...BASE_PARAMS, backgroundTreatment: 'a soft gradient panel' });
     expect(withTreatment).toContain('a soft gradient panel');
+  });
+
+  it('omits the background-pattern instruction entirely when absent, matching every other conditional block', () => {
+    const prompt = buildFullContextEditPrompt(BASE_PARAMS); // STYLE.backgroundPattern.present = false
+    expect(prompt).not.toContain('Background pattern');
+  });
+
+  it('real bug found live: when present, names the literal word and explicitly authorizes painting over a broken/blank existing attempt, not just adding fresh content - base_asset was confirmed live to already bake a drifting, malformed repeat of this word into the photo before this edit ever runs, and a purely additive instruction left that corruption untouched', () => {
+    const withPattern: PosterStyleSpec = {
+      ...STYLE,
+      backgroundPattern: {
+        present: true,
+        word: 'MARATHON',
+        containerDescription: 'a diagonal yellow panel in the upper right',
+        styleDescription: 'bold outlined display lettering',
+        color: { type: 'solid', color: '#E6B800' },
+        opacityRatio: 0.25,
+      },
+    };
+    const prompt = buildFullContextEditPrompt({ ...BASE_PARAMS, style: withPattern });
+    expect(prompt).toContain('"MARATHON"');
+    expect(prompt).toContain('a diagonal yellow panel in the upper right');
+    expect(prompt).toMatch(/paint over that area completely/);
+    expect(prompt).toMatch(/exact same letterforms as every other repeat/);
   });
 
   it('quotes the bottom info block\'s layoutDescription near-verbatim as the authoritative structure', () => {

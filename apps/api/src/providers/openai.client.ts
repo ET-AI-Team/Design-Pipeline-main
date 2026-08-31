@@ -348,16 +348,25 @@ export interface GenerateAdCopyResult extends AdCopy {
 // em-dash mid-headline before ("...lasting relief—at your desk.") even
 // with no instruction against it. Never trust an instruction alone for
 // something checkable in code, same principle as every clamp/cap
-// elsewhere in this pipeline. Replaced with a comma-space when a dash
-// sits between words (the common "X - Y" / "X—Y" pattern reads fine as
-// "X, Y"), otherwise just removed.
+// elsewhere in this pipeline.
 // A dash strictly at an ALLOWED edge (start/end, per the caller) is just
-// removed. A dash anywhere else becomes ", " regardless of whether it
-// already had surrounding whitespace - real generated output has used
-// an em-dash with NO surrounding spaces ("relief—at your desk"), which
-// a whitespace-requiring regex would silently mangle into "reliefat"
-// instead of "relief, at" - fixed by checking position, not by
-// requiring whitespace to already be there.
+// removed.
+//
+// Every other dash is replaced with either ", " or " ", chosen by
+// whether real whitespace already surrounded it in the source text -
+// real bug found live: a single fixed ", " replacement handled the
+// motivating case fine ("X - Y" / "X—Y", a genuine two-clause
+// separator, reads correctly as "X, Y") but silently broke a HYPHENATED
+// COMPOUND WORD, which has no whitespace around its hyphen at all
+// ("mom-to-be", "doctor-approved") - blindly inserting a comma there
+// produced grammatically broken output ("mom, to, be", "Doctor,
+// approved plans"), confirmed on a real paid run. A tight, no-
+// whitespace dash is replaced with a plain space instead - this reads
+// correctly for a genuine compound word ("mom to be", "doctor approved")
+// AND still reads fine for the original tight-em-dash motivating case
+// ("relief at your desk"), so one rule covers both without needing to
+// actually distinguish "is this really a compound word" - something
+// this function has no reliable way to know.
 function stripDashesCore(text: string, allowLeadingStrip: boolean, allowTrailingStrip: boolean): string {
   return text
     .replace(/\s*[-‐-―]\s*/g, (match, offset: number, full: string) => {
@@ -365,7 +374,8 @@ function stripDashesCore(text: string, allowLeadingStrip: boolean, allowTrailing
       const atEnd = offset + match.length >= full.length;
       if (atStart && allowLeadingStrip) return '';
       if (atEnd && allowTrailingStrip) return '';
-      return ', ';
+      const hadSurroundingWhitespace = match.length > 1; // more than just the bare dash character itself
+      return hadSurroundingWhitespace ? ', ' : ' ';
     })
     .replace(/\s{2,}/g, ' ')
     .replace(/\s+([,.])/g, '$1')
@@ -655,6 +665,29 @@ export interface PosterStyleSpec {
    */
   centerXRatio: number; // where centered content's own horizontal midpoint actually sits, as a ratio of canvas WIDTH - only meaningful for elements whose align is 'center'
   /**
+   * A large-scale word or short phrase repeated/tiled purely as a
+   * background TEXTURE - not a piece of copy meant to be individually
+   * read, but a decorative device (e.g. a giant outlined brand word
+   * repeated diagonally behind the subject). Real defect found live:
+   * this is unambiguously "text" per the letters-count-as-text rule
+   * classifyBaseLayer uses for backgroundTreatment, so it can never be
+   * captured there (base_asset's non-text-only field) - but it also
+   * never fit otherElements' model, which assumes one discrete chip at
+   * one precise position (approxYRatio/approxHeightRatio), not a
+   * texture that repeats across a whole region. With nowhere to go, it
+   * was silently dropped entirely - the reference's single most
+   * visually distinctive design device never reached the generated
+   * poster at all. null if the reference doesn't use this device.
+   */
+  backgroundPattern: {
+    present: boolean;
+    word: string; // the literal repeated word/phrase, read directly off the reference - never invented
+    containerDescription: string; // the shape/color/extent of the region this texture sits within, e.g. "a solid diagonal color-block panel, golden yellow, covering the upper-right ~45% of the canvas along a diagonal line from upper-left to lower-right" - empty string if the texture has no distinct container (sits directly on the photo)
+    styleDescription: string; // the word's own typographic treatment - outlined/hollow vs filled, weight, letter-spacing, roughly how large and how densely each repeat reads relative to canvas height
+    color: ColorSpec;
+    opacityRatio: number; // 0-1, how faded/subtle vs solid the repeated text reads - most of these are low-opacity or outline-only, not solid
+  };
+  /**
    * Catch-all for any distinct design element that doesn't fit headline/
    * subtext/cta/trustList - e.g. a secondary co-branding badge under the
    * logo, a ribbon, a seal, a small tag. A sibling of trustList (not
@@ -815,6 +848,7 @@ Look specifically at:
 - A separate promo/offer badge: is there a distinct small badge or pill element (e.g. a percent-off icon with a short label like "EARLY BIRD SALE") that sits alongside the info block as its own visual piece, not inside a card list as a price row and not a CTA button? If yes, describe its visual container (shape, color, icon) in promoBadge.description - not its text, that's generated separately. If no, say so plainly.
 - Overall ("textColumnWidthRatio"): judged against the CURRENT image's ACTUAL subject position (not the reference's) - the MAXIMUM text-column width, as a ratio of canvas WIDTH measured from the left margin, that GUARANTEES no overlap with the photo's subject, with a real safety margin. This becomes a hard boundary in the final render, not a soft description - every piece of text (headline, subtext, CTA, trust list) will be constrained to stay within it. If in doubt, judge narrower (more conservative) rather than wider - an undersized text column is a minor issue, but text overlapping the subject is a hard failure.
 - Separately ("centerXRatio"), a real defect found live: do NOT assume this is just the midpoint of the text column above - that column exists only to keep text off a side-by-side photo subject, and for a reference where the subject sits BELOW the text instead (text spans close to the FULL canvas width, with the photo underneath), the true visual center is nowhere near that column's midpoint - it is close to the canvas's own true center instead. So judge this directly, by eye, from the reference's actual layout: if you drew a vertical line through where the centered content (headline/subtext/etc, wherever align is "center") actually balances left-to-right, where would that line sit, as a ratio of the CURRENT image's canvas width? Judge this the same way for every kind of composition - side-by-side, subject-below, full-bleed, anything else - never assume it must relate to marginXRatio or textColumnWidthRatio at all. If nothing in this design is center-aligned, still give your best estimate of a reasonable center point (it will go unused).
+- Background pattern ("backgroundPattern"): is there a large-scale word or short phrase repeated/tiled across a region of the composition purely as a decorative TEXTURE, not meant to be read as a discrete line of copy (e.g. a giant outlined brand word repeated diagonally behind the subject, faded or low-opacity lettering tiled across a color panel)? This is different from every other text field above - it has no single position, it repeats. If present: read the literal repeated word straight off the reference (never invent one), describe the container it sits within if there is a distinct one (a color-block panel, a gradient region - describe its own shape/color/extent; empty string if the texture sits directly on the photo with no distinct panel), describe the word's own typographic treatment (outlined/hollow vs filled, weight, roughly how large/dense the repeats read), its color, and how faded/subtle vs solid it reads as an opacity ratio 0-1. If no such texture exists, set present: false and leave the other fields as reasonable empty defaults - do not invent one just because the reference has SOME background design element; a plain solid or gradient color block with no repeated lettering on it is not this field (photo-baked treatments like that are a separate, earlier pipeline stage's concern, not this one).
 - CRITICAL exclusion for the catch-all pass below, a real defect found live: the third image attached is the actual brand logo file for THIS campaign - it is already being placed on the final poster by a separate, deterministic step, completely independent of this analysis. Do NOT create an otherElements entry for any design element in the reference whose content is simply that same brand/company/event identity restated as text elsewhere in the layout - a footer wordmark, a stacked two-line lockup, a tagline that is just the brand name again in a different font or color, anything that reads as "another version of the logo." Extracting one causes the pipeline to render a second, AI-recreated logo next to the real one. This exclusion is narrow and specific to the SAME brand as the attached logo image only - a genuinely different co-branding partner name (e.g. "Presented by" a different, unrelated company), a location/date chip, an offer badge, a stat grid, or any other campaign-specific content is NOT covered by this exclusion and must still be captured normally below.
 - Finally, a catch-all pass (subject to the exclusion above): look for any OTHER distinct design element anywhere in the composition that isn't covered by any category above - e.g. a secondary partner/co-branding badge under the logo, a ribbon, a seal, a small tag, a date/location chip. For each one you find:
   - Describe its overall container (shape, border, background fill) in "description", and its position specifically ("positionDescription", e.g. "directly below the logo, left-aligned to the text column" - never vague).
@@ -830,7 +864,7 @@ Look specifically at:
 
 If an element is absent, still return its object with reasonable defaults and its "present"/"itemCount"/"iconStyle" field set to indicate absence (present: false, itemCount: 0, iconStyle: "none", presentation: "none" as appropriate) - never omit a key.
 
-Respond ONLY with JSON matching this exact shape: {"marginXRatio": number, "spacing": {"logoToHeadlineGapRatio": number, "headlineToSubtextGapRatio": number, "afterTextBlockGapRatio": number, "ctaToTrustListGapRatio": number}, "headline": {"lineCount": number, "align": "left"|"center", "lines": [{"fontSizeRatio": number, "fontWeight": number, "styleDescription": string, "color": {"type": "solid"|"gradient", "color": string, "gradientTo": string, "gradientDirection": "horizontal"|"vertical"|"diagonal"}}], "visualReference": {"recommended": boolean, "box": {"xRatio": number, "yRatio": number, "widthRatio": number, "heightRatio": number}}}, "subtext": {"present": boolean, "fontSizeRatio": number, "fontWeight": number, "styleDescription": string, "color": {"type": "solid"|"gradient", "color": string, "gradientTo": string, "gradientDirection": "horizontal"|"vertical"|"diagonal"}, "align": "left"|"center", "visualReference": {"recommended": boolean, "box": {"xRatio": number, "yRatio": number, "widthRatio": number, "heightRatio": number}}}, "cta": {"present": boolean, "heightRatio": number, "cornerRadiusRatio": number, "fillColor": string, "labelTextColor": string, "labelFontWeight": number, "labelStyleDescription": string, "hasPriceBand": boolean, "priceBandColor": string, "priceTextColor": string, "priceFontWeight": number, "fontSizeRatio": number, "textAlign": "left"|"center", "textInsetRatio": number, "visualReference": {"recommended": boolean, "box": {"xRatio": number, "yRatio": number, "widthRatio": number, "heightRatio": number}}}, "trustList": {"present": boolean, "itemCount": number, "layoutDescription": string, "iconStyle": "checkmark-filled"|"checkmark-outline"|"flat-checkmark"|"bullet-dot"|"custom"|"none", "presentation": "bar"|"card"|"inline"|"none", "heightRatio": number, "cardWidthRatio": number, "cardCornerRadiusRatio": number, "backgroundColor": string, "dividerColor": string, "textColor": string, "fontWeight": number, "fontSizeRatio": number, "checkmarkBadgeColor": string, "checkmarkIconColor": string, "checkmarkSizeRatio": number, "iconTextGapRatio": number, "iconOffsetRatio": number, "rowHeightRatio": number, "priceRowHeightRatio": number, "cardPaddingXRatio": number, "priceRow": {"present": boolean, "backgroundColor": string, "textColor": string, "fontWeight": number}, "promoBadge": {"present": boolean, "description": string}, "visualReference": {"recommended": boolean, "box": {"xRatio": number, "yRatio": number, "widthRatio": number, "heightRatio": number}}}, "textColumnWidthRatio": number, "centerXRatio": number, "otherElements": [{"description": string, "positionDescription": string, "align": "left"|"center", "approxYRatio": number, "approxHeightRatio": number, "gapAboveRatio": number, "parts": [{"text": string, "hasText": boolean, "styleDescription": string, "color": {"type": "solid"|"gradient", "color": string, "gradientTo": string, "gradientDirection": "horizontal"|"vertical"|"diagonal"}}], "visualReference": {"recommended": boolean, "box": {"xRatio": number, "yRatio": number, "widthRatio": number, "heightRatio": number}}}], "elementOrder": string[]}`;
+Respond ONLY with JSON matching this exact shape: {"marginXRatio": number, "spacing": {"logoToHeadlineGapRatio": number, "headlineToSubtextGapRatio": number, "afterTextBlockGapRatio": number, "ctaToTrustListGapRatio": number}, "headline": {"lineCount": number, "align": "left"|"center", "lines": [{"fontSizeRatio": number, "fontWeight": number, "styleDescription": string, "color": {"type": "solid"|"gradient", "color": string, "gradientTo": string, "gradientDirection": "horizontal"|"vertical"|"diagonal"}}], "visualReference": {"recommended": boolean, "box": {"xRatio": number, "yRatio": number, "widthRatio": number, "heightRatio": number}}}, "subtext": {"present": boolean, "fontSizeRatio": number, "fontWeight": number, "styleDescription": string, "color": {"type": "solid"|"gradient", "color": string, "gradientTo": string, "gradientDirection": "horizontal"|"vertical"|"diagonal"}, "align": "left"|"center", "visualReference": {"recommended": boolean, "box": {"xRatio": number, "yRatio": number, "widthRatio": number, "heightRatio": number}}}, "cta": {"present": boolean, "heightRatio": number, "cornerRadiusRatio": number, "fillColor": string, "labelTextColor": string, "labelFontWeight": number, "labelStyleDescription": string, "hasPriceBand": boolean, "priceBandColor": string, "priceTextColor": string, "priceFontWeight": number, "fontSizeRatio": number, "textAlign": "left"|"center", "textInsetRatio": number, "visualReference": {"recommended": boolean, "box": {"xRatio": number, "yRatio": number, "widthRatio": number, "heightRatio": number}}}, "trustList": {"present": boolean, "itemCount": number, "layoutDescription": string, "iconStyle": "checkmark-filled"|"checkmark-outline"|"flat-checkmark"|"bullet-dot"|"custom"|"none", "presentation": "bar"|"card"|"inline"|"none", "heightRatio": number, "cardWidthRatio": number, "cardCornerRadiusRatio": number, "backgroundColor": string, "dividerColor": string, "textColor": string, "fontWeight": number, "fontSizeRatio": number, "checkmarkBadgeColor": string, "checkmarkIconColor": string, "checkmarkSizeRatio": number, "iconTextGapRatio": number, "iconOffsetRatio": number, "rowHeightRatio": number, "priceRowHeightRatio": number, "cardPaddingXRatio": number, "priceRow": {"present": boolean, "backgroundColor": string, "textColor": string, "fontWeight": number}, "promoBadge": {"present": boolean, "description": string}, "visualReference": {"recommended": boolean, "box": {"xRatio": number, "yRatio": number, "widthRatio": number, "heightRatio": number}}}, "textColumnWidthRatio": number, "centerXRatio": number, "backgroundPattern": {"present": boolean, "word": string, "containerDescription": string, "styleDescription": string, "color": {"type": "solid"|"gradient", "color": string, "gradientTo": string, "gradientDirection": "horizontal"|"vertical"|"diagonal"}, "opacityRatio": number}, "otherElements": [{"description": string, "positionDescription": string, "align": "left"|"center", "approxYRatio": number, "approxHeightRatio": number, "gapAboveRatio": number, "parts": [{"text": string, "hasText": boolean, "styleDescription": string, "color": {"type": "solid"|"gradient", "color": string, "gradientTo": string, "gradientDirection": "horizontal"|"vertical"|"diagonal"}}], "visualReference": {"recommended": boolean, "box": {"xRatio": number, "yRatio": number, "widthRatio": number, "heightRatio": number}}}], "elementOrder": string[]}`;
 
   const images: VisionImageInput[] = [
     { url: params.referenceImageUrl, label: 'Reference - the design to match (content, hierarchy, colors, structure)' },
@@ -934,7 +968,7 @@ export async function classifyBaseLayer(params: ClassifyBaseLayerParams): Promis
 
 CRITICAL, a real defect found live: clean/uncluttered space is not always reserved on ONE SIDE (subject positioned left or right, the opposite side left clear) - many real compositions instead reserve a CENTERED band (e.g. the subject fills the lower portion of the frame, and the entire upper band, spanning close to the FULL width, is left clean for centered text sitting above it). Identify which of these two shapes actually applies here and say so explicitly, by name, in compositionGuide. If it is the centered-band case, this matters even more than usual: any secondary background element within that band (a landmark, a building, a sign, any object) MUST be described as sitting visibly OFF to one side, or explicitly flagged as needing to move off to one side in the new generation - a tall or prominent element sitting dead-center in an otherwise-clean band still blocks centered text even when it is faded, blurred, or desaturated, because centered text has to pass directly through the frame's own true horizontal middle, not merely avoid one side of it. "Faded" and "off-center" are two different, both-necessary properties - never treat softening an element's contrast as a substitute for actually moving it off the centerline.
 
-Then, separately, describe "backgroundTreatment": any non-text, non-logo design element the reference uses in or around the composition that is NOT simply part of the photograph's own natural content - a solid or gradient color block, a subtle graphic or illustration accent, a textured surface, anything that reads as an added design treatment rather than something the camera just happened to capture. Describe it specifically enough to be replicated directly in a new photo generation. Any element that spells out or forms letters, words, or numbers - no matter how large, faded, stylized, translucent, or purely decorative - counts as text and must NOT be described here, even if it reads as a background graphic accent rather than legible foreground copy (a giant faded wordmark behind the subject is still text). If the ONLY notable background element is such a wordmark/lettering treatment, return an empty string for this field - do not describe it in disguised terms ("a graphic accent", "a design element", "a decorative shape") instead of recognizing it as text. If the reference is simply a plain, unaltered photograph with no non-text treatment at all, also return an empty string - do not invent one.
+Then, separately, describe "backgroundTreatment": any non-text, non-logo design element the reference uses in or around the composition that is NOT simply part of the photograph's own natural content - a solid or gradient color block, a subtle graphic or illustration accent, a textured surface, anything that reads as an added design treatment rather than something the camera just happened to capture. Describe it specifically enough to be replicated directly in a new photo generation. Any element that spells out or forms letters, words, or numbers - no matter how large, faded, stylized, translucent, or purely decorative - counts as text and must NOT be described here, even if it reads as a background graphic accent rather than legible foreground copy (a giant faded wordmark behind the subject is still text - a separate later stage owns generating that lettering, never this field). CRITICAL, a real defect found live: this text exclusion applies ONLY to the literal lettering itself, never to a genuine non-text container it happens to sit on or inside - if a giant repeated wordmark is drawn on top of an otherwise-real color block, diagonal panel, or gradient region, you must still describe THAT underlying shape/color/extent here (that part is real, non-text background design and belongs in this field exactly like any other color block), simply omitting the lettering itself from your description. Only return an empty string here when there is truly no non-text element at all once the lettering is set aside - never as a shortcut because a wordmark happens to be involved. If the reference is simply a plain, unaltered photograph with no non-text treatment at all, also return an empty string - do not invent one.
 
 Then describe the photo's actual STYLE - this is a separate photo of a DIFFERENT subject/scene that needs to be generated to match this reference's look and feel, so describe it specifically enough that someone who has never seen this image could recreate its visual character:
 - Color grading: the actual color palette and tonal treatment (e.g. warm golden-hour tones with cream highlights, cool neutral daylight, desaturated overcast, high-contrast punchy colors) - be specific about warm vs cool, saturated vs muted, bright vs moody.
@@ -964,6 +998,177 @@ Respond ONLY with JSON matching this exact shape: {"compositionGuide": string, "
     latencyMs,
     costInr: VISION_COST_INR_PER_CALL,
   };
+}
+
+/**
+ * Dimension-expansion recomposition planning (§6.6 dimension_9x16 /
+ * dimension_4x5 / dimension_1.91x1). Real defect this replaces: those
+ * three stages used to send Gemini one hardcoded, per-job-blind one-
+ * liner ("Recompose this approved poster into {dimension}...") with no
+ * idea what text or background the poster actually contains - which is
+ * exactly the failure mode that produced a duplicated, garbled headline
+ * and a visibly stretched subject when this was tested manually against
+ * a real poster. This is now a two-step, different-model plan-then-
+ * generate: GPT-4.1 vision LOOKS at the actual approved poster and
+ * transcribes it (structured JSON, never freeform prose it might
+ * silently vary) - a different model from the one that will do the
+ * actual recomposition (gemini-3-pro-image), same "never self-graded /
+ * never self-planned" discipline this whole pipeline already uses
+ * everywhere else. `buildDimensionRecompositionPrompt` then
+ * deterministically assembles the final Gemini-facing prompt from that
+ * transcription in code - never trusting the vision call's own prose to
+ * BE the final instruction, the same "clamp/template it in code"
+ * discipline `render-poster.ts`'s clampStyle() and
+ * `poster-text-edit.ts`'s buildFullContextEditPrompt() already use for
+ * the poster stage.
+ */
+export interface DimensionTranscription {
+  logoText: string;
+  headlineLines: string[];
+  subtextText: string;
+  locationPillText: string;
+  ctaText: string;
+  statRowItems: string[];
+  otherText: string[];
+  backgroundDescription: string;
+}
+
+export interface PlanDimensionRecompositionParams {
+  posterUrl: string;
+  dimensionLabel: string; // e.g. '9x16', '4x5', '1.91x1' - kept a plain string so this file doesn't need a shared-types dependency just for a label
+  targetWidth: number;
+  targetHeight: number;
+  /** Only true for 9x16 - see buildDimensionRecompositionPrompt's doc
+   *  comment for why this is deliberately dimension-specific. */
+  includeSafeMargins: boolean;
+  /** Whatever the stage's own buildPrompt() produced - on a first
+   *  attempt that's just a short boilerplate sentence (harmless to
+   *  repeat, reinforces the constraints below), on a retry it carries
+   *  the previous attempt's real QA feedback. Deliberately not parsed
+   *  or distinguished here - appended as neutral extra context either
+   *  way, since correctly relaying real retry feedback matters far more
+   *  than avoiding a little redundant reinforcement on a first attempt. */
+  pipelineContext?: string;
+}
+
+export interface PlanDimensionRecompositionResult {
+  prompt: string;
+  latencyMs: number;
+  costInr: number;
+}
+
+/** Real-world Stories/Reels safe-zone convention (Instagram/Facebook):
+ *  the platform's own UI permanently covers roughly the top ~12% of the
+ *  screen (profile picture, username, close button) and a slightly
+ *  taller ~14% at the bottom (the reply/message input bar) - text or a
+ *  CTA placed there is routinely obscured by chrome the app itself
+ *  draws on top, regardless of how the creative is designed. Only
+ *  applied to 9x16, never 4x5/1.91x1 - those aren't full-bleed vertical
+ *  placements and have no equivalent platform chrome to avoid. */
+const DIMENSION_SAFE_MARGIN_TOP_RATIO = 0.12;
+const DIMENSION_SAFE_MARGIN_BOTTOM_RATIO = 0.14;
+
+function quoteList(items: string[]): string {
+  return items.map((item) => `"${item}"`).join(', ');
+}
+
+/** Exported for direct unit testing - pure/deterministic, no network
+ *  call, so its exact output text (the safe-margin math especially) can
+ *  be asserted without mocking anything. */
+export function buildDimensionRecompositionPrompt(params: {
+  transcription: DimensionTranscription;
+  dimensionLabel: string;
+  targetWidth: number;
+  targetHeight: number;
+  includeSafeMargins: boolean;
+  pipelineContext?: string;
+}): string {
+  const t = params.transcription;
+  const textLines: string[] = [];
+  if (t.logoText) textLines.push(`- Logo/brand lockup: "${t.logoText}"`);
+  if (t.headlineLines?.length)
+    textLines.push(`- Headline, exactly these lines in this order, each appearing ONCE only: ${t.headlineLines.map((l) => `"${l}"`).join(' then ')}`);
+  if (t.subtextText) textLines.push(`- Subtext: "${t.subtextText}"`);
+  if (t.locationPillText) textLines.push(`- Location/date pill: "${t.locationPillText}"`);
+  if (t.ctaText) textLines.push(`- CTA button: "${t.ctaText}"`);
+  if (t.statRowItems?.length) textLines.push(`- Stat/feature row items: ${quoteList(t.statRowItems)}`);
+  if (t.otherText?.length) textLines.push(`- Other text: ${quoteList(t.otherText)}`);
+
+  const marginBlock = (() => {
+    if (!params.includeSafeMargins) return '';
+    const topPx = Math.round(params.targetHeight * DIMENSION_SAFE_MARGIN_TOP_RATIO);
+    const bottomPx = Math.round(params.targetHeight * DIMENSION_SAFE_MARGIN_BOTTOM_RATIO);
+    const bottomY = params.targetHeight - bottomPx;
+    return `\n\nSAFE-ZONE REQUIREMENT (9x16 only, for Stories/Reels-style vertical placement where the platform's own UI permanently covers the top and bottom of the screen): leave the top ${topPx}px (~${Math.round(DIMENSION_SAFE_MARGIN_TOP_RATIO * 100)}% of the ${params.targetHeight}px canvas height, from y=0 to y=${topPx}) and the bottom ${bottomPx}px (~${Math.round(DIMENSION_SAFE_MARGIN_BOTTOM_RATIO * 100)}%, from y=${bottomY} to y=${params.targetHeight}) completely free of the logo, headline, subtext, CTA, stat row, and any footer/bottom bar - no text and no UI element of any kind in either band. Those two bands must show ONLY the extended base photo/background continuing naturally - the same subject and background already in the poster, just uninterrupted by any text or UI block. Every text/UI element must sit within the vertical band from y=${topPx} to y=${bottomY}.`;
+  })();
+
+  const contextBlock = params.pipelineContext ? `\n\nAdditional context from the pipeline: ${params.pipelineContext}` : '';
+
+  // Real defect found live: the source poster is always 1:1 square, so
+  // any target TALLER than it is wide (4x5, 9x16) adds new vertical
+  // canvas beyond what the square composition already fills. Without
+  // explicit guidance, the model's laziest fix is to dump ALL of that
+  // extra space into one gap (typically between the subtext/pill and
+  // the stat row) and leave the subject/monument group at its original
+  // size - which reads as an empty, unbalanced hole in the middle of
+  // the composition, exactly what a real 4x5/9x16 recomposition showed
+  // when this was checked manually. 1.91x1 (wider, not taller, than the
+  // square source) doesn't have this failure mode, so it's excluded.
+  const compositionBalanceBlock =
+    params.targetHeight > params.targetWidth
+      ? `\n\nCOMPOSITION BALANCE - this canvas is taller than the square source, so there is new vertical space to fill thoughtfully, not just dump into one spot: do NOT concentrate all of the extra height into a single large empty gap (e.g. between the subtext/pill and the stat row) while everything else stays at its original size and spacing - that reads as an empty, unbalanced hole in the middle of the composition. Instead, either (a) redistribute the extra space evenly across every gap in the layout (logo-to-headline, headline-to-subtext, subtext-to-stat-row, stat-row-to-footer, and the margin around the subject), so the whole composition feels intentionally, evenly spaced, or (b) scale the subject-and-background photo group up somewhat so it fills more of the new frame with the same confident, full presence it has in the source, rather than shrinking relative to the taller canvas. The result must read as a full, premium, deliberately composed layout - never as a sparse or emptied-out one.\n`
+      : '';
+
+  return `Recompose this exact finished poster into a ${params.dimensionLabel} aspect ratio, ${params.targetWidth}x${params.targetHeight} pixels. This is a recomposition/outpainting task, not a redesign and not a from-scratch regeneration - the subject, logo, and every text element already exist and must be carried over as-is, only the canvas shape changes.
+
+HARD CONSTRAINT - no stretching or distortion, of anything, anywhere:
+- The subject's body, limbs, face, and proportions must look exactly as natural and correctly proportioned as they do in the source image - never stretch, elongate, or warp anything to fit the new canvas shape. If the new canvas has extra space, add that space as new background AROUND the subject - never by stretching the subject.
+- Every background element (skyline, landmark, texture, gradient, pattern) must also never be stretched, squashed, or warped - extend the scene with plausible new content in the same style, never distort what already exists.
+- Do not add any extra limbs, extra hands, extra people, duplicated body parts, or ghosting/doubled-edge artifacts anywhere in the image.
+
+HARD CONSTRAINT - text must be reproduced exactly, with zero duplication or corruption:
+${textLines.length ? textLines.join('\n') : '- (no text elements were detected on this poster - do not invent any)'}
+Reproduce each line above EXACTLY ONCE - never repeat, duplicate, or re-use any word or line, and never alter spelling, punctuation, or casing.
+${compositionBalanceBlock}
+Background: ${t.backgroundDescription || 'match the existing background exactly, extended naturally to the new canvas size.'}${marginBlock}${contextBlock}
+
+Extend the background naturally to fill the new canvas. The final image must read as one single continuous photograph with no visible seam anywhere, professional advertising-campaign quality. Output must be exactly ${params.targetWidth}x${params.targetHeight} pixels, aspect ratio ${params.dimensionLabel}.`;
+}
+
+export async function planDimensionRecomposition(
+  params: PlanDimensionRecompositionParams
+): Promise<PlanDimensionRecompositionResult> {
+  const instruction = `Look at this exact finished poster image. You are planning - not performing - a recomposition of it into a new ${params.dimensionLabel} aspect ratio canvas. Your only job is to transcribe, EXACTLY as it appears, every piece of real text and every discrete UI element currently in the image, plus describe its background - this transcription will be used to instruct a different image model to reproduce this poster faithfully in a new canvas shape, so accuracy matters far more than eloquence.
+
+Read every word of real text in the image and copy it out character-for-character - do not paraphrase, summarize, or correct it in any way, even if it looks unusual:
+- The brand/event logo lockup text, if any
+- The headline, as separate lines exactly as they visually appear (one string per line, in reading order)
+- The subtext/body copy line(s) below the headline, if any
+- Any location/date pill or badge text, if any
+- The call-to-action button text, if any
+- Any stat/distance/feature row items, if any - each as its own string, combining its number/label and its short caption if both are present (e.g. "3Km - Run For Fun")
+- Any other standalone text element not covered above, if any
+
+Also describe the BACKGROUND in enough visual detail that someone who has never seen this image could redraw it: the color palette and gradient direction, any diagonal panels/shapes, any monument/skyline/landmark silhouette and roughly where it sits, any texture or repeated pattern - everything that is NOT the main subject/photo and NOT text.
+
+Respond ONLY with JSON matching this exact shape: {"logoText": string, "headlineLines": string[], "subtextText": string, "locationPillText": string, "ctaText": string, "statRowItems": string[], "otherText": string[], "backgroundDescription": string}. Use an empty string or empty array for anything that genuinely isn't present - never invent content that isn't really there.`;
+
+  // Low temperature: this is a "transcribe exactly what's on the page"
+  // call, not a creative one - same run-to-run-consistency reasoning
+  // callChatModel's own doc comment gives for every other "observe and
+  // describe" vision call in this file.
+  const { parsed, latencyMs } = await callVisionModel(params.posterUrl, instruction, 0.2);
+
+  const prompt = buildDimensionRecompositionPrompt({
+    transcription: parsed as DimensionTranscription,
+    dimensionLabel: params.dimensionLabel,
+    targetWidth: params.targetWidth,
+    targetHeight: params.targetHeight,
+    includeSafeMargins: params.includeSafeMargins,
+    pipelineContext: params.pipelineContext,
+  });
+
+  return { prompt, latencyMs, costInr: VISION_COST_INR_PER_CALL };
 }
 
 export interface EditPosterImageParams {
