@@ -16,7 +16,8 @@ import { ApiError } from '../lib/api-error';
 import { logger } from '../lib/logger';
 import { retryStuckJob } from '../orchestrator/retry-stuck-job';
 import { deleteJob } from '../orchestrator/delete-job';
-import { editAsset } from '../orchestrator/edit-asset';
+import { editAsset, MAX_USER_REFERENCE_IMAGES } from '../orchestrator/edit-asset';
+import { regenerateDimensions } from '../orchestrator/dimension-orchestrator';
 import { finalizeJobCreation } from '../orchestrator/finalize-job-creation';
 import { emitJobCreated } from '../realtime/emitters';
 import { approveJob, rejectJob } from '../realtime/approval-handler';
@@ -149,10 +150,31 @@ jobsRouter.get('/:id', async (req, res, next) => {
   try {
     const job = await db.job.findFirst({
       where: { id: req.params.id, deletedAt: null },
-      include: { stageAttempts: true, dimensionJobs: true, approvalLog: true },
+      include: {
+        stageAttempts: true,
+        dimensionJobs: true,
+        approvalLog: true,
+        // Edit history, newest first - previously this relation existed
+        // on the model and was returned by nothing, so /edit's results
+        // were invisible to any client.
+        assetEdits: { orderBy: { createdAt: 'desc' } },
+      },
     });
     if (!job) throw new ApiError('JOB_NOT_FOUND', 404, `No job with id ${req.params.id}`);
-    res.json({ data: job });
+
+    // Derived, not stored: a dimension is stale when the poster it was
+    // recomposed from has been edited since. Comparing the latest
+    // completed poster edit against each dimension's own winning attempt
+    // avoids adding a timestamp column to DimensionJob.
+    const latestPosterEdit = job.assetEdits.find((e) => e.target === 'poster' && e.completedAt && e.resultAssetUrl);
+    const dimensionAttempts = job.stageAttempts.filter((a) => a.stage.startsWith('dimension_') && a.result === 'PASS');
+    const staleDimensions = latestPosterEdit
+      ? dimensionAttempts
+          .filter((a) => a.completedAt && a.completedAt < latestPosterEdit.completedAt!)
+          .map((a) => a.stage.replace('dimension_', ''))
+      : [];
+
+    res.json({ data: { ...job, staleDimensions } });
   } catch (err) {
     next(err);
   }
@@ -178,30 +200,50 @@ jobsRouter.post('/:id/reject', async (req, res, next) => {
   }
 });
 
-/** POST /api/v1/jobs/:id/edit - "improve this" via Nano Banana Pro.
- *  Synchronous (a real Gemini call can take up to ~90s) - the new
- *  image replaces whatever was previously set for `target` outright,
- *  no version history. Takes an optional `referenceImage` file alongside
- *  the text instruction - e.g. "make the CTA look like this" - since a
- *  concrete visual reference transfers style far more reliably than
- *  prose alone (same reasoning poster-text-edit.ts's reference crops
- *  already rely on for the automated pipeline). */
+/** POST /api/v1/jobs/:id/edit - "improve this".
+ *  Synchronous (a real provider call can take up to ~90s). For a poster
+ *  the instruction is translated into a structured patch against the
+ *  poster's stored copy/style spec and the text layer is re-rendered
+ *  from Job.baseAssetUrl - the immutable photo+logo composite - so
+ *  repeated edits never stack generations on each other. Accepts up to
+ *  MAX_USER_REFERENCE_IMAGES `referenceImages` files alongside the text,
+ *  since a concrete visual reference transfers style far more reliably
+ *  than prose alone. Every edit is recorded in AssetEdit with its lane,
+ *  patch, resulting spec and verification verdict. */
 jobsRouter.post(
   '/:id/edit',
-  upload.single('referenceImage'),
+  upload.array('referenceImages', MAX_USER_REFERENCE_IMAGES),
   validate(EditAssetSchema, 'body'),
   async (req, res, next) => {
     try {
       const jobId = req.params.id!;
       const { target, instruction } = (req as any).validatedBody;
-      const referenceImage = assertOptionalFile(req.file, 'referenceImage', ACCEPTED_IMAGE_MIME_TYPES, MAX_REFERENCE_FILE_BYTES);
-      const result = await editAsset({ jobId, target, instruction, referenceImageBuffer: referenceImage?.buffer });
+      const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+      const referenceImageBuffers = files.map(
+        (f, i) => assertOptionalFile(f, `referenceImages[${i}]`, ACCEPTED_IMAGE_MIME_TYPES, MAX_REFERENCE_FILE_BYTES)!.buffer
+      );
+      const result = await editAsset({ jobId, target, instruction, referenceImageBuffers });
       res.json({ data: result });
     } catch (err) {
       next(err);
     }
   }
 );
+
+/** POST /api/v1/jobs/:id/dimensions/regenerate - re-runs all three
+ *  dimension expansions against the CURRENT poster. Needed after a
+ *  poster edit, since the existing dimensions were recomposed from the
+ *  poster that edit replaced (editAsset returns `dimensionsStale` to
+ *  surface exactly that). Deliberately user-triggered, never automatic:
+ *  it spends ~Rs38 of real generation. */
+jobsRouter.post('/:id/dimensions/regenerate', async (req, res, next) => {
+  try {
+    const job = await regenerateDimensions(req.params.id!);
+    res.json({ data: { jobId: job.id, status: job.status } });
+  } catch (err) {
+    next(err);
+  }
+});
 
 /** POST /api/v1/jobs/:id/retry - API Contract §8, LLD §7.1 */
 jobsRouter.post('/:id/retry', async (req, res, next) => {

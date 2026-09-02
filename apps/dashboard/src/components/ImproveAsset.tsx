@@ -2,8 +2,10 @@ import { useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Loader2, Wand2, X, ImagePlus } from 'lucide-react';
+import { Loader2, Wand2, X, ImagePlus, AlertTriangle, Check } from 'lucide-react';
 import type { EditTarget } from '@pipeline/shared-types';
+
+const MAX_REFERENCE_IMAGES = 4;
 
 interface Props {
   jobId: string;
@@ -11,60 +13,121 @@ interface Props {
   label: string;
 }
 
+interface EditOutcome {
+  lane: 'copy' | 'style' | 'pixel';
+  reason: string;
+  verification?: { qaScore: number; qaReasoning: string; allFieldsPassed: boolean };
+  dimensionsStale: boolean;
+}
+
+const LANE_LABEL: Record<EditOutcome['lane'], string> = {
+  copy: 'text change',
+  style: 'style change',
+  pixel: 'full re-render',
+};
+
 /**
- * UI for POST /api/v1/jobs/:id/edit - a free-text "improve this" edit,
- * with an optional attached reference image, against whichever asset is
- * currently live for `target` (the poster, or one delivered dimension).
- * The image slot is optional - a concrete visual reference ("make the
- * CTA look like this") transfers a specific target far more reliably
- * than prose alone, but plenty of edits (color/wording tweaks) don't
- * need one. Deliberately outside the automated pipeline on the backend
- * (no QA, no retry, no version history - the new image just replaces
- * the old one in place) so this control mirrors that: one instruction
- * (+ optional image) in, the existing asset overwritten on success,
- * nothing kept to roll back to. The call is synchronous and can take up
- * to ~90s (a real Gemini edit call), so the button stays disabled with a
- * spinner for the whole wait rather than optimistically closing early.
+ * UI for POST /api/v1/jobs/:id/edit.
+ *
+ * For a poster, the backend translates the instruction into a structured
+ * patch against the poster's stored copy/style spec and re-renders the
+ * text layer from the immutable photo+logo base - so repeated edits stay
+ * one generation from clean instead of stacking on each other. Up to
+ * MAX_REFERENCE_IMAGES reference images can be attached; a concrete
+ * visual target transfers style far more reliably than prose.
+ *
+ * The call is synchronous and can take up to ~90s, so the button stays
+ * disabled with a spinner for the whole wait rather than optimistically
+ * closing early.
  */
 export function ImproveAsset({ jobId, target, label }: Props) {
   const [open, setOpen] = useState(false);
   const [instruction, setInstruction] = useState('');
-  const [image, setImage] = useState<File | undefined>(undefined);
+  const [images, setImages] = useState<File[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<EditOutcome | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const queryClient = useQueryClient();
 
   const editMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (): Promise<EditOutcome> => {
       const formData = new FormData();
       formData.append('target', target);
       formData.append('instruction', instruction.trim());
-      if (image) formData.append('referenceImage', image);
+      for (const image of images) formData.append('referenceImages', image);
 
       const res = await fetch(`/api/v1/jobs/${jobId}/edit`, { method: 'POST', body: formData });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error?.message ?? 'Edit failed - please try again.');
-      return body.data.assetUrl as string;
+      return body.data as EditOutcome;
     },
-    onMutate: () => setError(null),
+    onMutate: () => {
+      setError(null);
+      setOutcome(null);
+    },
     onError: (err) => setError(err instanceof Error ? err.message : 'Edit failed - please try again.'),
-    onSuccess: () => {
+    onSuccess: (data) => {
       setInstruction('');
-      setImage(undefined);
+      setImages([]);
       setOpen(false);
+      // Kept after close so the result stays visible - the lane and the
+      // verification verdict are the useful part ("it changed the CTA
+      // text", "the CTA still reads JOIN TODAY").
+      setOutcome(data);
       queryClient.invalidateQueries({ queryKey: ['job', jobId] });
     },
   });
 
+  function addFiles(selected: FileList | null) {
+    if (!selected) return;
+    setImages((prev) => [...prev, ...Array.from(selected)].slice(0, MAX_REFERENCE_IMAGES));
+    // Reset so picking the same file twice in a row still fires onChange.
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
   if (!open) {
     return (
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="text-primary flex items-center gap-1 text-[11.5px] font-semibold hover:underline"
-      >
-        <Wand2 className="size-3" /> Improve this {label}
-      </button>
+      <div className="space-y-1.5">
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="text-primary flex items-center gap-1 text-[11.5px] font-semibold hover:underline"
+        >
+          <Wand2 className="size-3" /> Improve this {label}
+        </button>
+        {outcome && (
+          <div className="space-y-1 text-[11px]">
+            <p className="text-muted-foreground">
+              Applied as a <span className="font-semibold">{LANE_LABEL[outcome.lane]}</span>
+              {outcome.reason ? ` - ${outcome.reason}` : ''}
+            </p>
+            {outcome.verification && (
+              <p
+                className={
+                  outcome.verification.allFieldsPassed ? 'text-success flex items-start gap-1' : 'text-attention flex items-start gap-1'
+                }
+              >
+                {outcome.verification.allFieldsPassed ? (
+                  <Check className="mt-0.5 size-3 shrink-0" />
+                ) : (
+                  <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+                )}
+                <span>
+                  {outcome.verification.allFieldsPassed
+                    ? `Verified ${outcome.verification.qaScore}/10`
+                    : `Check this one: ${outcome.verification.qaReasoning}`}
+                </span>
+              </p>
+            )}
+            {outcome.dimensionsStale && (
+              <p className="text-attention flex items-start gap-1">
+                <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+                <span>The existing dimensions came from the previous poster and no longer match it.</span>
+              </p>
+            )}
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -87,7 +150,7 @@ export function ImproveAsset({ jobId, target, label }: Props) {
       <Textarea
         value={instruction}
         onChange={(e) => setInstruction(e.target.value)}
-        placeholder="e.g. make the headline larger, change the CTA button to green..."
+        placeholder="e.g. change the CTA to JOIN NOW, make the CTA green..."
         rows={2}
         maxLength={500}
         disabled={editMutation.isPending}
@@ -97,25 +160,43 @@ export function ImproveAsset({ jobId, target, label }: Props) {
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         accept="image/jpeg,image/png,image/webp"
         className="hidden"
-        onChange={(e) => setImage(e.target.files?.[0])}
+        onChange={(e) => addFiles(e.target.files)}
       />
-      <button
-        type="button"
-        onClick={() => (image ? setImage(undefined) : fileInputRef.current?.click())}
-        disabled={editMutation.isPending}
-        title={image ? 'Remove reference image' : 'Attach a reference image (optional)'}
-        className="border-border text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-40 flex h-7 items-center gap-1.5 rounded-full border pr-2.5 pl-2 text-[11px] font-medium transition-colors"
-      >
-        {image ? (
-          <img src={URL.createObjectURL(image)} alt="" className="size-4 rounded-full object-cover" />
-        ) : (
-          <ImagePlus className="size-3.5" strokeWidth={1.75} />
+      <div className="flex flex-wrap items-center gap-1.5">
+        {images.map((image, i) => (
+          <span
+            key={`${image.name}-${i}`}
+            className="border-border text-muted-foreground flex h-7 items-center gap-1.5 rounded-full border pr-2 pl-2 text-[11px]"
+          >
+            <img src={URL.createObjectURL(image)} alt="" className="size-4 rounded-full object-cover" />
+            <span className="max-w-[110px] truncate">{image.name}</span>
+            <button
+              type="button"
+              onClick={() => setImages((prev) => prev.filter((_, idx) => idx !== i))}
+              disabled={editMutation.isPending}
+              title="Remove"
+              className="hover:text-destructive disabled:opacity-40"
+            >
+              <X className="size-3" />
+            </button>
+          </span>
+        ))}
+        {images.length < MAX_REFERENCE_IMAGES && (
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={editMutation.isPending}
+            title="Attach reference image(s) (optional)"
+            className="border-border text-muted-foreground hover:border-primary hover:text-primary disabled:opacity-40 flex h-7 items-center gap-1.5 rounded-full border pr-2.5 pl-2 text-[11px] font-medium transition-colors"
+          >
+            <ImagePlus className="size-3.5" strokeWidth={1.75} />
+            {images.length === 0 ? 'Reference image' : 'Add another'}
+          </button>
         )}
-        {image ? image.name : 'Reference image'}
-        {image && <X className="size-3" />}
-      </button>
+      </div>
 
       {error && <p className="text-destructive text-[11px]">{error}</p>}
       <div className="flex justify-end">

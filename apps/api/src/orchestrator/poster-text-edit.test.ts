@@ -492,6 +492,78 @@ describe('buildFullContextEditPrompt', () => {
     expect(prompt).toContain("Do NOT let Image 1's own subject, clothing, pose, background, or landmark drift toward how a reference image");
   });
 
+  // --- /edit's user-attached reference images ---
+  //
+  // These are numbered relative to whatever the pipeline itself already
+  // attached, so the numbering is the part that can silently break: a
+  // wrong number points the model at somebody else's image, and the
+  // whole reason every image gets an explicit numbered role (see the
+  // Image 1 test above) is that a mislabeled or unlabeled attachment
+  // has been silently ignored - or worse, blended - by this model
+  // before.
+  it('numbers user attachments AFTER the derived crops and the full reference, matching runFullContextEdit ordering', () => {
+    const prompt = buildFullContextEditPrompt({
+      ...BASE_PARAMS,
+      referenceCrops: [
+        { name: 'headline', label: 'headline style reference', box: { xRatio: 0, yRatio: 0, widthRatio: 0.5, heightRatio: 0.2 } },
+        { name: 'cta', label: 'CTA button style reference', box: { xRatio: 0, yRatio: 0.5, widthRatio: 0.4, heightRatio: 0.1 } },
+      ],
+      includeFullReferenceImage: true,
+      userReferenceCount: 2,
+    });
+    // 1 = target, 2-3 = crops, 4 = full reference, so users start at 5.
+    expect(prompt).toContain('- Image 5: a reference image the USER attached');
+    expect(prompt).toContain('- Image 6: a reference image the USER attached');
+    expect(prompt).not.toContain('- Image 7:');
+    // Ordered last, after the pipeline's own attachments.
+    expect(prompt.indexOf('- Image 4:')).toBeLessThan(prompt.indexOf('- Image 5:'));
+  });
+
+  it('closes the numbering gap when no full reference image is attached', () => {
+    const prompt = buildFullContextEditPrompt({
+      ...BASE_PARAMS,
+      referenceCrops: [{ name: 'headline', label: 'headline style reference', box: { xRatio: 0, yRatio: 0, widthRatio: 0.5, heightRatio: 0.2 } }],
+      includeFullReferenceImage: false,
+      userReferenceCount: 1,
+    });
+    // 1 = target, 2 = the one crop, so the user's image is 3, not 4 -
+    // an off-by-one here would describe a nonexistent image and leave
+    // the real attachment unlabeled.
+    expect(prompt).toContain('- Image 3: a reference image the USER attached');
+    expect(prompt).not.toContain('- Image 4:');
+  });
+
+  it('tells the model which of N user images each one is, so a multi-image request is unambiguous', () => {
+    const prompt = buildFullContextEditPrompt({ ...BASE_PARAMS, userReferenceCount: 3 });
+    expect(prompt).toContain('(1 of 3)');
+    expect(prompt).toContain('(2 of 3)');
+    expect(prompt).toContain('(3 of 3)');
+  });
+
+  it('omits the "N of M" counter for a single user image rather than saying "1 of 1"', () => {
+    const prompt = buildFullContextEditPrompt({ ...BASE_PARAMS, userReferenceCount: 1 });
+    expect(prompt).toContain('a reference image the USER attached');
+    expect(prompt).not.toContain('1 of 1');
+  });
+
+  it('grants user attachments style-only authority, never subject matter', () => {
+    // A user attachment is the likeliest image to depict a whole
+    // finished ad, so it is the likeliest to get its content copied
+    // into the output. It has to carry the same never-blend rule the
+    // derived crops do.
+    const prompt = buildFullContextEditPrompt({ ...BASE_PARAMS, userReferenceCount: 1 });
+    expect(prompt).toContain('never as a source of subject matter or pixels for your output');
+    expect(prompt).toContain("never blended into Image 1's own photograph");
+  });
+
+  it('says nothing about user attachments on a pipeline-driven render', () => {
+    // Every normal poster render leaves userReferenceCount unset;
+    // describing an image that was never attached is exactly the
+    // mislabeling this manifest exists to prevent.
+    const prompt = buildFullContextEditPrompt(BASE_PARAMS);
+    expect(prompt).not.toContain('the USER attached');
+  });
+
   it('round 7 fix: omits the full-reference paragraph when includeFullReferenceImage is false, even with crops attached', () => {
     const prompt = buildFullContextEditPrompt({
       ...BASE_PARAMS,

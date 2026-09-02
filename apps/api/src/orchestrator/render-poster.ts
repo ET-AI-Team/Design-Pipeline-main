@@ -115,7 +115,11 @@ function naturalElementOrder(subtextPresent: boolean, ctaPresent: boolean, trust
  *  are never range-clamped - clamping only applies to numbers - but do
  *  get a defensive non-empty fallback, same principle as
  *  base_layer_classification's compositionGuide validation. */
-function clampStyle(raw: PosterStyleSpec): PosterStyleSpec {
+// Exported so /edit can run a router-produced style PATCH through the
+// exact same validation an AI-extracted style already gets - a patched
+// spec is no more trustworthy than a freshly extracted one, and this is
+// the one place that knows every field's sane envelope.
+export function clampStyle(raw: PosterStyleSpec): PosterStyleSpec {
   const headlineLineCount = Math.round(clamp(raw.headline.lineCount, 1, 5));
   const subtextPresent = !!raw.subtext?.present;
   const ctaPresent = !!raw.cta?.present;

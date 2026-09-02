@@ -420,6 +420,10 @@ export function stripDashesFromLines(lines: string[]): string[] {
   return lines.map((line, i) => stripDashesCore(line, i === 0, i === lines.length - 1));
 }
 
+/** Exported as sanitizeAdCopy below - /edit runs a router-produced copy
+ *  patch through the exact same sanitation a freshly generated copy set
+ *  gets, since a patch is no more trustworthy than any other model
+ *  output. */
 function stripDashesFromCopy(copy: AdCopy): AdCopy {
   return {
     headlineLines: stripDashesFromLines(Array.isArray(copy.headlineLines) ? copy.headlineLines : []),
@@ -441,6 +445,112 @@ function stripDashesFromCopy(copy: AdCopy): AdCopy {
     // additionally had no array-level guard at all, so a response
     // missing the key entirely used to reach .map() on undefined.
     otherElementTexts: (copy.otherElementTexts ?? []).map(stripDashes),
+  };
+}
+
+/** Public name for stripDashesFromCopy - see its doc comment. */
+export const sanitizeAdCopy = stripDashesFromCopy;
+
+export type EditLane = 'copy' | 'style' | 'pixel';
+
+export interface EditPatch {
+  copyPatch?: Partial<AdCopy>;
+  /** Deliberately loose: a nested partial of PosterStyleSpec. Typing it
+   *  precisely buys nothing here - it arrives as untyped JSON and is
+   *  deep-merged then run through clampStyle, which is what actually
+   *  makes it safe. */
+  stylePatch?: Record<string, unknown>;
+}
+
+export interface PlanEditPatchResult extends EditPatch {
+  lane: EditLane;
+  reason: string;
+  latencyMs: number;
+  costInr: number;
+}
+
+/**
+ * Decides WHICH of the three edit lanes an instruction belongs to, and
+ * for the two spec lanes produces the minimal patch that expresses it.
+ *
+ * Text-only (no images) and given a COMPACT view of the current copy and
+ * style rather than the whole PosterStyleSpec - that spec is thousands of
+ * tokens, and the router only needs to know which fields exist and what
+ * they currently hold to name the ones that should change.
+ */
+export async function planEditPatch(params: {
+  instruction: string;
+  currentCopy: AdCopy;
+  currentStyle: PosterStyleSpec;
+  hasUserReferences: boolean;
+}): Promise<PlanEditPatchResult> {
+  const s = params.currentStyle;
+  // Compact, human-readable summary of only the fields a patch can
+  // legally target - not JSON.stringify(style), which would be enormous
+  // and mostly irrelevant prose descriptions.
+  const styleSummary = {
+    headline: { align: s.headline.align, lineCount: s.headline.lineCount, colors: s.headline.lines.map((l) => l.color) },
+    subtext: { present: s.subtext.present, align: s.subtext.align, color: s.subtext.color },
+    cta: {
+      present: s.cta.present,
+      fillColor: s.cta.fillColor,
+      labelTextColor: s.cta.labelTextColor,
+      hasPriceBand: s.cta.hasPriceBand,
+      priceBandColor: s.cta.priceBandColor,
+      textAlign: s.cta.textAlign,
+    },
+    trustList: {
+      present: s.trustList.present,
+      itemCount: s.trustList.itemCount,
+      presentation: s.trustList.presentation,
+      iconStyle: s.trustList.iconStyle,
+      backgroundColor: s.trustList.backgroundColor,
+      textColor: s.trustList.textColor,
+    },
+    marginXRatio: s.marginXRatio,
+    centerXRatio: s.centerXRatio,
+    textColumnWidthRatio: s.textColumnWidthRatio,
+    elementOrder: s.elementOrder,
+  };
+
+  const instruction = `A user wants to change one finished ad poster. Decide how that change should be made, and return the SMALLEST patch that expresses it.
+
+Their request: "${params.instruction}"
+
+The poster's current TEXT CONTENT (adCopy):
+${JSON.stringify(params.currentCopy, null, 2)}
+
+The poster's current VISUAL SPEC (the patchable fields, abridged):
+${JSON.stringify(styleSummary, null, 2)}
+
+Choose exactly one lane:
+- "copy"  - the request changes WORDS only (a headline, a CTA label, a trust point, a price). Return copyPatch.
+- "style" - the request changes VISUAL PROPERTIES that exist as fields above (a color, an alignment, whether the CTA or trust list is present, element order). Return stylePatch.
+- "pixel" - the request cannot be expressed by any field above because it is about the PHOTOGRAPH or raw pixels: removing/adding an object, changing the subject, retouching, relighting, or matching an attached reference image's look. Return neither patch.
+${params.hasUserReferences ? 'The user ALSO attached reference image(s). If their request is about matching how those look, that is the "pixel" lane.\n' : ''}
+Rules for the patch:
+- Include ONLY the keys that must change. Never restate an unchanged value - a patch naming a field is treated as an intentional overwrite of it.
+- Arrays are replaced wholesale, so if you patch headlineLines or trustItems, give the COMPLETE new array, not just the changed entry.
+- Colors are hex strings. For a color field that supports gradients the shape is {"type":"solid","color":"#rrggbb"} or {"type":"gradient","color":"#rrggbb","gradientTo":"#rrggbb","gradientDirection":"horizontal"|"vertical"|"diagonal"}.
+- Never invent content the request does not ask for. If the request is vague about the exact words, keep the existing wording and change only what was clearly asked.
+- If the request would need BOTH a wording and a visual change, pick the one that is the actual point of the request and describe the other in "reason".
+
+Respond ONLY with JSON: {"reason": string, "lane": "copy"|"style"|"pixel", "copyPatch": object|null, "stylePatch": object|null}. Write "reason" FIRST - one short sentence naming what you are changing and why that lane - and let the lane and patch follow from it.`;
+
+  // Low temperature: this is a "classify and name the fields" task, not
+  // a creative one - same reasoning as every other observe-and-describe
+  // call in this file.
+  const { parsed, latencyMs } = await callChatModel(instruction, undefined, 0.1);
+
+  const lane: EditLane = parsed?.lane === 'copy' || parsed?.lane === 'style' ? parsed.lane : 'pixel';
+
+  return {
+    lane,
+    reason: String(parsed?.reason ?? ''),
+    copyPatch: lane === 'copy' && parsed?.copyPatch ? (parsed.copyPatch as Partial<AdCopy>) : undefined,
+    stylePatch: lane === 'style' && parsed?.stylePatch ? (parsed.stylePatch as Record<string, unknown>) : undefined,
+    latencyMs,
+    costInr: TEXT_COST_INR_PER_CALL,
   };
 }
 

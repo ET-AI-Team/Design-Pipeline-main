@@ -151,8 +151,31 @@ model AssetEdit {
   jobId          String
   job            Job       @relation(fields: [jobId], references: [id])
   target         String
+  // The asset this edit was RENDERED FROM. For a poster spec-edit that
+  // is always Job.baseAssetUrl (the immutable photo+logo composite), not
+  // the previous poster - which is precisely what stops edits from
+  // stacking generations on top of each other.
   sourceAssetUrl String
   instruction    String
+  // Which lane the router chose: "copy" (patch the ad copy), "style"
+  // (patch the PosterStyleSpec) or "pixel" (a whole-canvas edit, for
+  // instructions no spec field can express).
+  lane           String?
+  // The structured patch the router produced, before it was applied -
+  // what makes an edit diffable ("headline: X -> Y") rather than an
+  // opaque prose instruction.
+  patchJson      Json?
+  // The FULL effective { style, adCopy } after this patch was applied
+  // and validated. Load-bearing, not decorative: the next edit reads
+  // this back as its starting point, so edit #2 builds on edit #1
+  // instead of silently re-patching the original and reverting it. Also
+  // what makes undo real - re-rendering from an older row's specJson
+  // reproduces that exact version.
+  specJson       Json?
+  // verifyPoster()'s per-field verdict for this edit. Recorded, never
+  // enforced: /edit is human-in-the-loop by design, so this surfaces as
+  // a warning ("the CTA still reads JOIN TODAY") rather than gating.
+  verificationJson Json?
   // Both null while in-flight - completedAt null means still in-flight,
   // the exact same convention StageAttempt.completedAt already uses.
   resultAssetUrl String?

@@ -270,6 +270,49 @@ photographic element replaced with a vector one, an altered logo, or any text li
 
 </details>
 
+<details>
+<summary><b>The improvement loop</b> — <code>/edit</code>, after the pipeline is done</summary>
+
+<br/>
+
+The insight: **most "improvements" are edits to data, not to pixels.** Everything needed is already
+persisted — `baseAssetUrl` (photo + logo, immutable), and the winning poster attempt's exact
+`{ style, adCopy }` inputs. So an instruction becomes a **structured patch** against that spec,
+re-rendered from the clean base, rather than asking an image model to mutate its own output.
+
+One cheap GPT-4.1 text call routes the instruction into a lane and returns a minimal patch:
+
+| Lane | Instruction | Patch produced |
+|:--|:--|:--|
+| `copy` | *"the CTA should say JOIN NOW"* | `{"copyPatch":{"ctaLabel":"JOIN NOW"}}` |
+| `style` | *"make the CTA green"* | `{"stylePatch":{"cta":{"fillColor":"#22B573"}}}` |
+| `pixel` | *"match these references"* | none — full re-render from the clean base |
+
+Code applies the patch and **validates it** through the exact same `clampStyle` / `sanitizeAdCopy`
+the pipeline's own generated specs pass through, so an out-of-range ratio or a garbage hex is
+clamped rather than reaching the renderer. Arrays are replaced wholesale, never index-merged.
+
+**Why this matters:** the previous implementation regenerated the whole image *from the previous
+poster*, so three edits sat three generations deep and drift compounded irreversibly. Every edit
+now renders from `baseAssetUrl` and stores its complete resulting spec, which the *next* edit reads
+back — so edits accumulate in the **data** while every image stays **exactly one generation from
+pristine**. Verified live: two sequential edits, both sourced from the base asset, edit #2 carrying
+both changes.
+
+Up to **4 reference images** attach as distinct, numbered, explicitly-labelled `image[]` parts
+(5.74 MB of raw uploads downsized to 0.26 MB before sending). A verification pass runs with the
+pre-edit poster attached — **recorded, never gating**, because `/edit` is the tool where the human
+*is* the QA.
+
+Editing a poster leaves its three dimensions recomposed from an image that no longer exists, so
+they're flagged `staleDimensions` and the dashboard offers a one-click regenerate. Never automatic
+— that would spend ~₹38 without being asked.
+
+> **Honest limit:** the edit call runs without a mask, so the photo is still redrawn. This buys
+> "one generation from clean", not pixel-exact preservation. The masked lane is the next phase.
+
+</details>
+
 ---
 
 ## The quality gate
@@ -375,12 +418,13 @@ Base path `/api/v1/jobs`. Every response is `{ data }` or `{ error: { code, mess
 |:--|:--|:--|
 | `POST` | `/` | Create a job — `multipart/form-data`. Returns in ~1s; uploads and dispatch continue in the background. |
 | `GET` | `/` | List jobs — `?status=&limit=&offset=` |
-| `GET` | `/:id` | Full job with stage attempts, dimensions and approval log |
+| `GET` | `/:id` | Full job with stage attempts, dimensions, approval log, **edit history** and derived `staleDimensions` |
 | `PATCH` | `/:id` | Rename |
 | `DELETE` | `/:id` | Soft-delete the row, hard-delete every Cloudinary asset |
 | `POST` | `/:id/approve` | Approve → fans out all 3 dimensions |
 | `POST` | `/:id/reject` | Reject (terminal) |
-| `POST` | `/:id/edit` | Free-text "improve this" against the poster or one dimension, with an **optional reference image**. Synchronous, up to ~90s. |
+| `POST` | `/:id/edit` | Free-text "improve this" against the poster or one dimension, with up to **4 reference images**. Routes to a copy / style / pixel lane and re-renders from the clean base. Synchronous, ~80s. |
+| `POST` | `/:id/dimensions/regenerate` | Re-expand all 3 dimensions against the current poster, after a poster edit made them stale |
 | `POST` | `/:id/retry` | Recover a stuck job or one stuck dimension |
 
 <details>
@@ -540,11 +584,11 @@ bun run typecheck     # all workspaces
 | **No auth** | No authentication, multi-tenancy or rate limiting. Trusted network only. |
 | **Single instance** | API, Socket.IO and both workers share one process. Scaling out needs a Redis adapter for cross-instance socket rooms (`InterServerEvents` is reserved for exactly this). |
 | **No spend controls** | Nothing caps cost on a workload running ~₹66/job. |
-| **`AssetEdit` is unused** | The table exists with a full audit-trail shape; `editAsset()` overwrites URLs in place and never writes to it. |
 | **HTTP reject drops the comment** | Only the WebSocket path persists `ApprovalLog.comment`. |
 | **`GEMINI_FLASH_MODEL` unused** | Configured but never called — every generation uses Pro. Likely the single largest cost saving available. |
 | **`dimension_*` is a full regeneration** | Rather than extending the clean photo and re-running the deterministic steps on the new canvas. |
-| **No orphan reaper** | A crash mid-stage leaves `completedAt: null` with no automatic recovery. |
+| **No undo endpoint** | Every edit stores a complete, re-renderable spec, so undo is possible at the data layer — but nothing exposes it yet. |
+| **`/edit` has no mask** | A poster edit is one generation from clean rather than pixel-exact; the photo is still redrawn. The masked lane is the next phase. |
 
 ---
 

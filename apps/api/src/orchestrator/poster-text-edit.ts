@@ -265,6 +265,15 @@ async function prepareFullReferenceImage(referenceBuffer: Buffer): Promise<Buffe
     .toBuffer();
 }
 
+/** Same downsize+JPEG treatment as every other attached reference, for
+ *  images a USER uploads with an /edit request. Not cosmetic: a raw
+ *  15MB upload attached verbatim would bloat the multipart body of a
+ *  call that already has a known hang/timeout profile once several
+ *  images are attached (see editPosterImage's AbortController note). */
+export async function prepareUserReferenceImage(buffer: Buffer): Promise<Buffer> {
+  return prepareFullReferenceImage(buffer);
+}
+
 /**
  * Precise, numeric layout instructions for the reference's design -
  * same "describe geometry as percentages of canvas, not adjectives"
@@ -468,6 +477,12 @@ export interface FullContextEditParams {
   // attached separately via editPosterImage's referenceImages, same
   // split as referenceCrops.
   includeFullReferenceImage: boolean;
+  /** How many images the USER attached to an /edit request. Attached
+   *  last, after referenceCrops and the full reference - only used here
+   *  to number and label them in the manifest; the bytes are passed
+   *  separately, same split as the two fields above. 0 for every
+   *  pipeline-driven render. */
+  userReferenceCount?: number;
   feedback?: string;
 }
 
@@ -519,6 +534,19 @@ export function buildFullContextEditPrompt(params: FullContextEditParams): strin
     manifestLines.push(
       `- Image ${fullRefImageNumber}: the FULL layout of that same different, unrelated reference design, shown only so you can judge scale and position - not the photo to edit, not a source of subject matter.`
     );
+  }
+  // User attachments come last, matching runFullContextEdit's own
+  // ordering when it appends them to referenceImages.
+  const userRefCount = params.userReferenceCount ?? 0;
+  if (userRefCount > 0) {
+    const firstUserImageNumber = params.referenceCrops.length + (params.includeFullReferenceImage ? 1 : 0) + 2;
+    for (let i = 0; i < userRefCount; i++) {
+      manifestLines.push(
+        `- Image ${firstUserImageNumber + i}: a reference image the USER attached with their change request${
+          userRefCount > 1 ? ` (${i + 1} of ${userRefCount})` : ''
+        }, showing the look they are asking for. Use it for style, color, treatment or proportion as their request describes - never as a source of subject matter or pixels for your output, and never blended into Image 1's own photograph.`
+      );
+    }
   }
   lines.push('Images attached to this request, in order, and what each one is for:');
   lines.push(manifestLines.join('\n'));
@@ -813,7 +841,13 @@ export interface FullContextEditResult {
 export async function runFullContextEdit(
   compositeBuffer: Buffer,
   referenceImageBuffer: Buffer | null,
-  params: Omit<FullContextEditParams, 'canvasW' | 'canvasH' | 'referenceCrops' | 'includeFullReferenceImage'>
+  params: Omit<FullContextEditParams, 'canvasW' | 'canvasH' | 'referenceCrops' | 'includeFullReferenceImage'>,
+  /** Extra images a USER attached to an /edit request, appended after
+   *  this call's own derived crops. Already downsized by the caller via
+   *  prepareUserReferenceImage. Each gets an explicit labelled role, the
+   *  same discipline every other attachment here follows - an unlabelled
+   *  image has been silently ignored by a model before. */
+  userReferenceImages: Array<{ buffer: Buffer; label: string }> = []
 ): Promise<FullContextEditResult> {
   const { width, height } = await sharp(compositeBuffer).metadata();
   const canvasW = width ?? 1024;
@@ -850,10 +884,25 @@ export async function runFullContextEdit(
   // canvasW/canvasH are always the real, just-measured composite
   // dimensions - never supplied by the caller, since they aren't known
   // until this buffer is actually read.
-  const instruction = buildFullContextEditPrompt({ ...params, canvasW, canvasH, referenceCrops: selectedCrops, includeFullReferenceImage });
+  const instruction = buildFullContextEditPrompt({
+    ...params,
+    canvasW,
+    canvasH,
+    referenceCrops: selectedCrops,
+    includeFullReferenceImage,
+    userReferenceCount: userReferenceImages.length,
+  });
   const size = pickEditSize(canvasW, canvasH);
 
-  const edit = await editPosterImage({ imageBuffer: compositeBuffer, instruction, size, referenceImages });
+  // User attachments go LAST, after the derived crops and the full
+  // reference - the prompt's image manifest numbers them in exactly this
+  // order, so the order here and there must not drift.
+  const edit = await editPosterImage({
+    imageBuffer: compositeBuffer,
+    instruction,
+    size,
+    referenceImages: [...referenceImages, ...userReferenceImages],
+  });
 
   const outputMeta = await sharp(edit.imageBuffer).metadata();
   const resizedOutput =

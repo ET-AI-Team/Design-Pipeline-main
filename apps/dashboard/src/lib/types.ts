@@ -44,6 +44,24 @@ export interface JobDetail {
   stageAttempts: StageAttempt[];
   dimensionJobs: DimensionJobRow[];
   approvalLog: ApprovalLog | null;
+  assetEdits?: AssetEditRow[];
+  /** Dimension names whose asset predates the latest poster edit, so
+   *  they were recomposed from a poster that no longer exists. Derived
+   *  server-side on read, not stored. */
+  staleDimensions?: string[];
+}
+
+export interface AssetEditRow {
+  id: string;
+  target: string;
+  instruction: string;
+  lane: string | null;
+  resultAssetUrl: string | null;
+  errorMessage: string | null;
+  costInr: string | null;
+  latencyMs: number | null;
+  createdAt: string;
+  completedAt: string | null;
 }
 
 export interface JobSummary {

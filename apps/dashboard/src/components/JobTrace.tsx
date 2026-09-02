@@ -17,7 +17,7 @@ import {
 import type { JobSummary } from '@/lib/types';
 import { relativeTime, unwrapJson } from '@/lib/utils';
 import type { JobStatus, EditTarget } from '@pipeline/shared-types';
-import { AlertCircle, Check, X, Loader2, ArrowRight, IndianRupee, Pencil, Trash2 } from 'lucide-react';
+import { AlertCircle, Check, X, Loader2, ArrowRight, IndianRupee, Pencil, Trash2, RefreshCw } from 'lucide-react';
 
 const TERMINAL_VARIANT: Record<string, 'success' | 'attention' | 'secondary'> = {
   COMPLETE: 'success',
@@ -103,6 +103,20 @@ export function JobTrace({ jobId, onNewJob, onDeleted }: Props) {
       socket.off('job:status_changed', handleStatusChanged);
     };
   }, [jobId, queryClient]);
+
+  const regenerateDimensionsMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/v1/jobs/${jobId}/dimensions/regenerate`, { method: 'POST' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error?.message ?? 'Could not regenerate the dimensions - please try again.');
+      }
+    },
+    onMutate: () => setMutationError(null),
+    onError: (err) =>
+      setMutationError(err instanceof Error ? err.message : 'Could not regenerate the dimensions - please try again.'),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['job', jobId] }),
+  });
 
   const retryMutation = useMutation({
     mutationFn: async () => {
@@ -468,7 +482,27 @@ export function JobTrace({ jobId, onNewJob, onDeleted }: Props) {
       {/* Dimensions */}
       {job.dimensionJobs.length > 0 && (
         <div className="border-border mt-9 border-t pt-7">
-          <p className="mb-4 text-[13.5px] font-bold">Dimensions</p>
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <p className="text-[13.5px] font-bold">Dimensions</p>
+            {(job.staleDimensions?.length ?? 0) > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => regenerateDimensionsMutation.mutate()}
+                disabled={regenerateDimensionsMutation.isPending}
+                className="border-attention/40 text-attention hover:bg-attention/5"
+              >
+                {regenerateDimensionsMutation.isPending ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                Regenerate all 3
+              </Button>
+            )}
+          </div>
+          {(job.staleDimensions?.length ?? 0) > 0 && (
+            <p className="text-attention mb-4 flex items-start gap-1.5 text-[12px]">
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
+              These were recomposed from an earlier version of the poster and no longer match the edited one.
+            </p>
+          )}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             {job.dimensionJobs.map((d) => {
               const attempts = dimensionAttempts(d.dimension);
