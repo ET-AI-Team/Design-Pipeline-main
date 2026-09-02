@@ -69,6 +69,7 @@ model Job {
   stageAttempts StageAttempt[]
   dimensionJobs DimensionJob[]
   approvalLog   ApprovalLog?
+  assetEdits    AssetEdit[]
 
   @@index([status])
   @@index([createdAt])
@@ -131,4 +132,35 @@ model ApprovalLog {
   decision  String
   comment   String?
   decidedAt DateTime
+}
+
+// A user-driven, natural-language "further refine this" edit against
+// Nano Banana Pro (gemini-3-pro-image) - deliberately outside the
+// automated PASS/RETRY/ESCALATE pipeline entirely (no qaScore/result,
+// no retry cap): the human reviewing the result IS the QA here. One row
+// per edit attempt, target is either "poster" or a DimensionName
+// ("9x16" | "4x5" | "1.91x1") - kept a plain String, not a Prisma enum,
+// so it can share the exact same values DIMENSION_NAMES already defines
+// in shared-types without duplicating that list here. No separate
+// storage for "the original" - the winning StageAttempt row for this
+// target (stage: "poster" or "dimension_{name}", result: PASS) already
+// holds that URL immutably; this table only ever holds edits made ON
+// TOP of it.
+model AssetEdit {
+  id             String    @id @default(uuid())
+  jobId          String
+  job            Job       @relation(fields: [jobId], references: [id])
+  target         String
+  sourceAssetUrl String
+  instruction    String
+  // Both null while in-flight - completedAt null means still in-flight,
+  // the exact same convention StageAttempt.completedAt already uses.
+  resultAssetUrl String?
+  errorMessage   String?
+  costInr        Decimal?
+  latencyMs      Int?
+  createdAt      DateTime  @default(now())
+  completedAt    DateTime?
+
+  @@index([jobId, target])
 }

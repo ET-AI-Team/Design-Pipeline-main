@@ -7,6 +7,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { StageStep } from '@/components/StageStep';
 import { BoundingBoxImage } from '@/components/BoundingBoxImage';
 import { ImageLightbox } from '@/components/ImageLightbox';
+import { ImproveAsset } from '@/components/ImproveAsset';
 import {
   PIPELINE_STAGES,
   STAGE_LABELS,
@@ -15,7 +16,7 @@ import {
 } from '@/lib/types';
 import type { JobSummary } from '@/lib/types';
 import { relativeTime, unwrapJson } from '@/lib/utils';
-import type { JobStatus } from '@pipeline/shared-types';
+import type { JobStatus, EditTarget } from '@pipeline/shared-types';
 import { AlertCircle, Check, X, Loader2, ArrowRight, IndianRupee, Pencil, Trash2 } from 'lucide-react';
 
 const TERMINAL_VARIANT: Record<string, 'success' | 'attention' | 'secondary'> = {
@@ -346,17 +347,32 @@ export function JobTrace({ jobId, onNewJob, onDeleted }: Props) {
           { src: job.reference1Url, alt: 'Reference 1' },
           { src: job.reference2Url, alt: 'Reference 2' },
           { src: job.logoUrl, alt: 'Logo' },
-        ].map((img) => (
-          <button
-            key={img.alt}
-            type="button"
-            onClick={() => setPreviewSrc(img.src)}
-            className="bg-muted border-border hover:ring-primary flex size-16 items-center justify-center rounded-[7px] border p-1 transition-shadow hover:ring-2"
-            title={img.alt}
-          >
-            <img src={img.src} alt={img.alt} className="max-h-full max-w-full object-contain" />
-          </button>
-        ))}
+        ].map((img) =>
+          // Empty for the few seconds between job creation and the
+          // reference uploads landing (the API returns a jobId
+          // immediately now and uploads in the background - see
+          // finalize-job-creation.ts). Render the placeholder rather
+          // than a broken <img> during that window.
+          img.src ? (
+            <button
+              key={img.alt}
+              type="button"
+              onClick={() => setPreviewSrc(img.src)}
+              className="bg-muted border-border hover:ring-primary flex size-16 items-center justify-center rounded-[7px] border p-1 transition-shadow hover:ring-2"
+              title={img.alt}
+            >
+              <img src={img.src} alt={img.alt} className="max-h-full max-w-full object-contain" />
+            </button>
+          ) : (
+            <div
+              key={img.alt}
+              title={`${img.alt} (uploading…)`}
+              className="bg-muted border-border text-muted-foreground flex size-16 items-center justify-center rounded-[7px] border"
+            >
+              <Loader2 className="size-4 animate-spin" />
+            </div>
+          )
+        )}
       </div>
 
       {/* Live trace */}
@@ -391,6 +407,10 @@ export function JobTrace({ jobId, onNewJob, onDeleted }: Props) {
           >
             <img src={job.posterUrl} alt="Poster" className="w-full" />
           </button>
+
+          <div className="mb-4">
+            <ImproveAsset jobId={jobId} target="poster" label="poster" />
+          </div>
 
           {!showRejectForm ? (
             <div className="flex gap-2.5">
@@ -476,6 +496,9 @@ export function JobTrace({ jobId, onNewJob, onDeleted }: Props) {
                       attempt {a.attemptNumber}: {a.result} {a.qaScore !== null && `(QA ${a.qaScore}/10)`}
                     </p>
                   ))}
+                  {d.assetUrl && (
+                    <ImproveAsset jobId={jobId} target={d.dimension as EditTarget} label={d.dimension} />
+                  )}
                 </div>
               );
             })}

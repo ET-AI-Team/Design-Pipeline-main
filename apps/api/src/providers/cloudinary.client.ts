@@ -27,17 +27,42 @@ export interface UploadResult {
  * edge case to special-case around - the whole function needed to
  * move off the streaming path.
  */
+const UPLOAD_MAX_ATTEMPTS = 3;
+const UPLOAD_BASE_DELAY_MS = 400;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function uploadToCloudinary(
   buffer: Buffer,
   options: { folder: string; publicId?: string }
 ): Promise<UploadResult> {
   const dataUri = `data:image/png;base64,${buffer.toString('base64')}`;
-  const result = await cloudinary.uploader.upload(dataUri, {
-    folder: options.folder,
-    public_id: options.publicId,
-    resource_type: 'image',
-  });
-  return { secureUrl: result.secure_url, publicId: result.public_id };
+
+  // Real gap this closes: every OTHER outbound call in this codebase
+  // retries transient failures automatically (lib/http-client.ts's
+  // interceptor for Gemini/OpenAI, BullMQ's own `attempts: 3` for stage
+  // jobs), but Cloudinary uploads go through the official SDK and so
+  // bypassed all of it - a single transient blip on any upload failed
+  // the whole stage outright. Same exponential-backoff-with-jitter shape
+  // as http-client.ts, deliberately, rather than a second retry style.
+  let lastError: unknown;
+  for (let attempt = 0; attempt < UPLOAD_MAX_ATTEMPTS; attempt++) {
+    try {
+      const result = await cloudinary.uploader.upload(dataUri, {
+        folder: options.folder,
+        public_id: options.publicId,
+        resource_type: 'image',
+      });
+      return { secureUrl: result.secure_url, publicId: result.public_id };
+    } catch (err) {
+      lastError = err;
+      if (attempt === UPLOAD_MAX_ATTEMPTS - 1) break;
+      await sleep(UPLOAD_BASE_DELAY_MS * 2 ** attempt + Math.random() * UPLOAD_BASE_DELAY_MS);
+    }
+  }
+  throw lastError;
 }
 
 /**

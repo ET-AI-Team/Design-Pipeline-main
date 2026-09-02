@@ -39,6 +39,7 @@ export interface JobDeletedPayload {
   jobId: string;
 }
 
+
 export interface JoinJobPayload {
   jobId: string;
 }

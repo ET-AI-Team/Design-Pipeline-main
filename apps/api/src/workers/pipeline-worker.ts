@@ -66,8 +66,24 @@ async function onFailed(bullJob: BullJob<StageJobPayload> | undefined, err: Erro
   await escalateTechnicalFailure(bullJob.data.jobId, bullJob.data.stage, bullJob.data.attemptNumber, err.message);
 }
 
-export const imageGenerationWorker = new Worker('image-generation', processStageJob, stalledJobWorkerOptions);
-export const visionScoringWorker = new Worker('vision-scoring', processStageJob, stalledJobWorkerOptions);
+// Real bug found reviewing this for scale: WorkerOptions.concurrency was
+// never set here, so BullMQ's own default (1) applied to both queues -
+// every image-generation job (base_asset AND all 3 dimension_* stages)
+// ran strictly one at a time, system-wide, no matter how many jobs were
+// in flight. Confirmed live: onApproved()'s Promise.all dispatches all 3
+// dimension stages at once, but at concurrency 1 they still executed
+// sequentially (167s wall-clock for what should be a ~60s parallel
+// window). Env-tunable rather than hardcoded so ops can raise/lower
+// without a redeploy while watching real provider latency/error rates
+// in the stage_attempt_completed/worker_job_failed logs.
+export const imageGenerationWorker = new Worker('image-generation', processStageJob, {
+  ...stalledJobWorkerOptions,
+  concurrency: Number(process.env.IMAGE_GEN_CONCURRENCY ?? 8),
+});
+export const visionScoringWorker = new Worker('vision-scoring', processStageJob, {
+  ...stalledJobWorkerOptions,
+  concurrency: Number(process.env.VISION_SCORING_CONCURRENCY ?? 8),
+});
 
 imageGenerationWorker.on('failed', onFailed);
 visionScoringWorker.on('failed', onFailed);

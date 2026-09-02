@@ -4,6 +4,7 @@ import {
   CreateJobSchema,
   RenameJobSchema,
   ListJobsQuerySchema,
+  EditAssetSchema,
   ACCEPTED_IMAGE_MIME_TYPES,
   ACCEPTED_LOGO_MIME_TYPES,
   MAX_REFERENCE_FILE_BYTES,
@@ -12,13 +13,13 @@ import {
 import { db } from '../lib/db';
 import { validate } from '../middleware/validate';
 import { ApiError } from '../lib/api-error';
-import { uploadToCloudinary } from '../providers/cloudinary.client';
-import { dispatchStageJob } from '../queues/dispatch';
+import { logger } from '../lib/logger';
 import { retryStuckJob } from '../orchestrator/retry-stuck-job';
 import { deleteJob } from '../orchestrator/delete-job';
+import { editAsset } from '../orchestrator/edit-asset';
+import { finalizeJobCreation } from '../orchestrator/finalize-job-creation';
 import { emitJobCreated } from '../realtime/emitters';
 import { approveJob, rejectJob } from '../realtime/approval-handler';
-import { getStageDefinition } from '../orchestrator/stage-registry';
 
 export const jobsRouter: Router = Router();
 
@@ -31,6 +32,24 @@ function assertFile(
   maxBytes: number
 ): Express.Multer.File {
   if (!file) throw new ApiError('VALIDATION_ERROR', 400, `${fieldName} is required`, { field: fieldName });
+  if (!acceptedTypes.includes(file.mimetype)) {
+    throw new ApiError('UNSUPPORTED_FILE_TYPE', 415, `${fieldName} must be one of: ${acceptedTypes.join(', ')}`, { field: fieldName });
+  }
+  if (file.size > maxBytes) {
+    throw new ApiError('FILE_TOO_LARGE', 413, `${fieldName} exceeds the ${maxBytes / (1024 * 1024)}MB limit`, { field: fieldName });
+  }
+  return file;
+}
+
+/** Same checks as assertFile(), but for a field that's allowed to be
+ *  absent entirely - e.g. /edit's optional referenceImage. */
+function assertOptionalFile(
+  file: Express.Multer.File | undefined,
+  fieldName: string,
+  acceptedTypes: readonly string[],
+  maxBytes: number
+): Express.Multer.File | undefined {
+  if (!file) return undefined;
   if (!acceptedTypes.includes(file.mimetype)) {
     throw new ApiError('UNSUPPORTED_FILE_TYPE', 415, `${fieldName} must be one of: ${acceptedTypes.join(', ')}`, { field: fieldName });
   }
@@ -57,36 +76,35 @@ jobsRouter.post(
       const logo = assertFile(files.logo?.[0], 'logo', ACCEPTED_LOGO_MIME_TYPES, MAX_LOGO_FILE_BYTES);
       const { prompt } = (req as any).validatedBody;
 
-      const [ref1Upload, ref2Upload, logoUpload] = await Promise.all([
-        uploadToCloudinary(reference1.buffer, { folder: 'references' }),
-        uploadToCloudinary(reference2.buffer, { folder: 'references' }),
-        uploadToCloudinary(logo.buffer, { folder: 'logos' }),
-      ]);
-
+      // Row first, uploads after - see finalize-job-creation.ts for the
+      // measured reason (three real Cloudinary uploads made this route
+      // ~6.8s solo and 13-59s under a 30-concurrent burst). The URLs are
+      // deliberately empty for the few seconds until the uploads land;
+      // `status: QUEUED` is what actually carries "created, not started
+      // yet" (the one JobStatus that was previously only ever a Prisma
+      // default and never a real observed state), and every consumer
+      // keys off status, not off the URL strings.
       const job = await db.job.create({
         data: {
-          reference1Url: ref1Upload.secureUrl,
-          reference2Url: ref2Upload.secureUrl,
-          logoUrl: logoUpload.secureUrl,
+          reference1Url: '',
+          reference2Url: '',
+          logoUrl: '',
           prompt,
-          status: 'BASE_LAYER_CLASSIFYING',
+          status: 'QUEUED',
         },
       });
 
       emitJobCreated(job.id, job.createdAt.toISOString());
 
-      // base_layer_classification now runs first (its nextStageOnPass is
-      // 'base_asset') - base_asset's buildPrompt depends on
-      // job.baseLayerSpecJson being populated, which only happens once
-      // this stage passes.
-      const classificationStage = getStageDefinition('base_layer_classification');
-      await dispatchStageJob({
-        jobId: job.id,
-        stage: 'base_layer_classification',
-        attemptNumber: 1,
-        prompt: classificationStage.buildPrompt(job),
-        inputAssetUrl: classificationStage.getInputAssetUrl(job),
-      });
+      // Deliberately NOT awaited - this is the whole point of the split.
+      // finalizeJobCreation owns its own failure handling (it can't throw
+      // into an already-sent response), so a rejection here would only
+      // ever be a bug in that handler itself.
+      void finalizeJobCreation(job.id, {
+        reference1: reference1.buffer,
+        reference2: reference2.buffer,
+        logo: logo.buffer,
+      }).catch((err) => logger.error({ err, job_id: job.id }, 'finalize_job_creation_unhandled'));
 
       res.status(201).json({ data: { jobId: job.id, status: job.status, createdAt: job.createdAt.toISOString() } });
     } catch (err) {
@@ -159,6 +177,31 @@ jobsRouter.post('/:id/reject', async (req, res, next) => {
     next(err);
   }
 });
+
+/** POST /api/v1/jobs/:id/edit - "improve this" via Nano Banana Pro.
+ *  Synchronous (a real Gemini call can take up to ~90s) - the new
+ *  image replaces whatever was previously set for `target` outright,
+ *  no version history. Takes an optional `referenceImage` file alongside
+ *  the text instruction - e.g. "make the CTA look like this" - since a
+ *  concrete visual reference transfers style far more reliably than
+ *  prose alone (same reasoning poster-text-edit.ts's reference crops
+ *  already rely on for the automated pipeline). */
+jobsRouter.post(
+  '/:id/edit',
+  upload.single('referenceImage'),
+  validate(EditAssetSchema, 'body'),
+  async (req, res, next) => {
+    try {
+      const jobId = req.params.id!;
+      const { target, instruction } = (req as any).validatedBody;
+      const referenceImage = assertOptionalFile(req.file, 'referenceImage', ACCEPTED_IMAGE_MIME_TYPES, MAX_REFERENCE_FILE_BYTES);
+      const result = await editAsset({ jobId, target, instruction, referenceImageBuffer: referenceImage?.buffer });
+      res.json({ data: result });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 /** POST /api/v1/jobs/:id/retry - API Contract §8, LLD §7.1 */
 jobsRouter.post('/:id/retry', async (req, res, next) => {

@@ -82,9 +82,44 @@ for (const dimension of DIMENSION_NAMES) {
         // covers this window at the parent level.
         scoringStatus: 'DIMENSION_EXPANDING',
         resizeToExact: target,
-        // Unchanged - QA/scoring is not part of this change.
-        rubricPrompt:
-          'Score this aspect-ratio recomposition out of 10 for seam visibility and natural background extension. The subject must never appear stretched, and the image must read as one continuous photograph with no visible seam.',
+        // Real defect found live (job eeb3f754, the 4x5): this stage was
+        // the one remaining generateAndScore() caller that never passed
+        // qaReferenceImages, so the QA judge scored the recomposition
+        // completely BLIND - it never saw the poster it was supposed to
+        // be a recomposition OF. Gemini returned a total redesign (a
+        // different runner, a flat vector Charminar instead of the
+        // photographic one, a different logo lockup, and the subtext
+        // rendered twice) and it scored 10/10 - the highest of the three
+        // dimensions - because the old rubric below only ever asked
+        // about seams and stretching, both of which a clean redesign
+        // passes perfectly. Its own reasoning even described the vector
+        // monument approvingly. Exactly the same blind-judge bug already
+        // fixed twice in this pipeline (base_asset's rubric, and
+        // poster's "photo/logo unaltered" check, which likewise declared
+        // a visibly different photo unaltered until the real before-image
+        // was attached).
+        qaReferenceImages: [
+          {
+            url: inputAssetUrl,
+            label:
+              'The approved 1:1 poster this image is supposed to be a RECOMPOSITION of. Compare the submitted image against this one directly - same photo, same person, same logo, same text, same visual style, only the canvas shape should differ.',
+          },
+        ],
+        rubricPrompt: `Score this aspect-ratio recomposition out of 10. The second attached image is the approved source poster; the first is the recomposed version being judged. This was supposed to reshape that exact poster into a ${dimension} canvas - NOT redesign it, NOT regenerate it, NOT reinterpret it.
+
+FIDELITY TO THE SOURCE - check each against the source poster, any single mismatch here is an automatic fail (score 3 or lower, and say exactly which one):
+- The photographed subject must be the SAME person: same face, same build, same clothing, same pose. A different-looking runner is a hard fail, however good the new one looks.
+- Any photographic background element (a monument, skyline, street) must stay PHOTOGRAPHIC and be the same one. Replacing a real photographed monument with a flat illustrated/vector/silhouette version of it is a hard fail.
+- The logo must be the identical lockup - same wording, same colors, same treatment. A re-drawn or re-colored logo is a hard fail.
+- Colors, typography and overall design language must match the source (e.g. a gradient headline must stay a gradient, not become flat).
+
+TEXT - compare word for word against the source poster:
+- Every text element in the source must appear in the recomposition EXACTLY ONCE. Any line rendered twice, any line missing, any invented text, or any altered spelling/casing is an automatic fail: score 3 or lower and quote the offending text.
+
+RECOMPOSITION QUALITY - only if everything above matches:
+- No visible seam, and background extended naturally into the new space.
+- The subject must never appear stretched, squashed or warped; proportions must match the source.
+- The layout should read as a deliberate, balanced composition for this canvas shape, not as the source with one large empty gap.`,
       });
 
       // The vision-planning call above is a real, separately-billed GPT-

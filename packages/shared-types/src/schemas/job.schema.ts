@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DIMENSION_NAMES } from '../enums';
 
 /** POST /jobs - API Contract §3. File fields are validated separately by
  *  multer (size/type) before this schema checks the text field. */
@@ -31,3 +32,21 @@ export const ListJobsQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 export type ListJobsQuery = z.infer<typeof ListJobsQuerySchema>;
+
+/** POST /jobs/:id/edit targets either the 1:1 poster or one specific
+ *  dimension - a plain enum of 'poster' plus the existing
+ *  DIMENSION_NAMES, reused rather than duplicated. */
+export const EDIT_TARGETS = ['poster', ...DIMENSION_NAMES] as const;
+export type EditTarget = (typeof EDIT_TARGETS)[number];
+
+/** POST /jobs/:id/edit - a free-text "improve this" request sent
+ *  directly to Nano Banana Pro against whichever asset is currently set
+ *  for `target`. Deliberately outside the automated pipeline (no
+ *  rubric, no retry cap) - the human reading the result IS the QA. The
+ *  new image replaces the old one outright (Job.posterUrl or the
+ *  matching DimensionJob.assetUrl is overwritten) - no version history. */
+export const EditAssetSchema = z.object({
+  target: z.enum(EDIT_TARGETS),
+  instruction: z.string().trim().min(3).max(500),
+});
+export type EditAssetInput = z.infer<typeof EditAssetSchema>;
