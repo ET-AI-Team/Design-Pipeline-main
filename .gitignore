@@ -15,6 +15,7 @@ output/
 # so committing it just creates a second thing to keep in sync.
 api-contracts.md
 docs/
+ui-update-prompt.md
 
 # pm2 runtime logs (the directory itself is kept via logs/.gitkeep so
 # pm2 has somewhere to write on a fresh clone).

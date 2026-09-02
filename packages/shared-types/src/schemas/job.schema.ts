@@ -39,12 +39,26 @@ export type ListJobsQuery = z.infer<typeof ListJobsQuerySchema>;
 export const EDIT_TARGETS = ['poster', ...DIMENSION_NAMES] as const;
 export type EditTarget = (typeof EDIT_TARGETS)[number];
 
-/** POST /jobs/:id/edit - a free-text "improve this" request sent
- *  directly to Nano Banana Pro against whichever asset is currently set
- *  for `target`. Deliberately outside the automated pipeline (no
- *  rubric, no retry cap) - the human reading the result IS the QA. The
- *  new image replaces the old one outright (Job.posterUrl or the
- *  matching DimensionJob.assetUrl is overwritten) - no version history. */
+/** POST /jobs/:id/edit - a free-text "improve this" request.
+ *
+ *  Rewritten 2026-09-02: a poster edit is no longer a whole-image
+ *  regeneration from the previous poster. The instruction is routed to a
+ *  copy/style/pixel lane, translated into a structured patch against the
+ *  poster's stored spec, and re-rendered from Job.baseAssetUrl via
+ *  gpt-image-2 - so repeated edits accumulate in the DATA while every
+ *  image stays exactly one generation from clean. Non-poster targets
+ *  (a dimension has no spec of its own) still take a whole-canvas edit.
+ *
+ *  Still deliberately outside the automated pipeline: a verification
+ *  pass runs and is recorded, but never gates or retries - the human
+ *  reading the result IS the QA. Every edit is now recorded in an
+ *  AssetEdit row (lane, patch, resulting spec, verification verdict),
+ *  so there IS version history, and the response reports which lane
+ *  handled it plus whether existing dimensions are now stale.
+ *
+ *  This schema covers only the two TEXT fields; the up-to-4 optional
+ *  `referenceImages` file parts are validated in the route by multer +
+ *  assertOptionalFile, not here. */
 export const EditAssetSchema = z.object({
   target: z.enum(EDIT_TARGETS),
   instruction: z.string().trim().min(3).max(500),
