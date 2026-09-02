@@ -156,4 +156,82 @@ describe('handleStageResult', () => {
       15_000
     );
   });
+
+  describe('one attempt is only ever decided once (regression: job 3106ae7d)', () => {
+    // The amplifier in a real incident: BullMQ re-delivered base_asset
+    // attempt 1 (a downstream crash had been misattributed to it), this
+    // function ran a second time for the same attempt, and overwrote a
+    // recorded PASS 8/10 with RETRY 6/10 - the QA judge is
+    // non-deterministic, so the re-run genuinely disagreed with itself.
+    // The job then BOTH advanced and retried, giving one pipeline two
+    // live branches that later collided on a duplicate stage row.
+    it(
+      'ignores a second result for an already-completed attempt, keeping the first outcome',
+      async () => {
+        await handleStageResult(jobId, 'hsr_test_stage', 1, passResult);
+
+        // Same attempt, delivered again, now with a failing score.
+        await handleStageResult(jobId, 'hsr_test_stage', 1, { ...passResult, qaScore: 4, qaReasoning: 'second opinion' });
+
+        const attempt = await db.stageAttempt.findUniqueOrThrow({
+          where: { jobId_stage_attemptNumber: { jobId, stage: 'hsr_test_stage', attemptNumber: 1 } },
+        });
+        // First outcome stands; the late disagreement changed nothing.
+        expect(attempt.result).toBe('PASS');
+        expect(attempt.qaScore?.toString()).toBe('9');
+        expect(attempt.qaReasoning).toBe('looks good');
+      },
+      20_000
+    );
+
+    it(
+      'a re-delivered failing result cannot escalate a job whose attempt already passed',
+      async () => {
+        await handleStageResult(jobId, 'hsr_test_stage', 1, passResult);
+        await handleStageResult(jobId, 'hsr_test_stage', 1, { ...passResult, qaScore: 2 });
+
+        const job = await db.job.findUniqueOrThrow({ where: { id: jobId } });
+        expect(job.status).not.toBe('NEEDS_ATTENTION');
+      },
+      20_000
+    );
+
+    it(
+      'two SIMULTANEOUS deliveries of the same attempt still leave exactly one coherent decision',
+      async () => {
+        // allSettled, not all: under true simultaneity the loser blocks
+        // on the winner's row lock and can exceed Prisma's 5s
+        // interactive-transaction timeout, so it may reject rather than
+        // no-op. That is acceptable and contained (the caller is either
+        // a BullMQ job, which just retries into the fast pre-check, or
+        // runDeterministicStage, which escalates its own stage) - what
+        // must NEVER happen is two decisions landing. This asserts the
+        // invariant, not the loser's exit route.
+        //
+        // Note the realistic case is covered by the two tests above:
+        // a re-delivery arrives seconds later, hits the pre-check, and
+        // returns cleanly without touching the transaction at all.
+        await Promise.allSettled([
+          handleStageResult(jobId, 'hsr_test_stage', 1, passResult),
+          handleStageResult(jobId, 'hsr_test_stage', 1, { ...passResult, qaScore: 3 }),
+        ]);
+
+        // Scoped to attempt 1 deliberately. Which delivery wins the claim
+        // is legitimately nondeterministic, and if the FAILING one wins it
+        // correctly dispatches an attempt 2 row - so a total row count
+        // says nothing. What must hold is that the attempt actually raced
+        // over ends up with exactly one row carrying one coherent outcome.
+        const attempt1 = await db.stageAttempt.findMany({
+          where: { jobId, stage: 'hsr_test_stage', attemptNumber: 1 },
+        });
+        expect(attempt1).toHaveLength(1);
+        expect(attempt1[0]!.completedAt).not.toBeNull();
+        // Never a mix of the two results - the score and the verdict must
+        // come from the same delivery.
+        const qa = Number(attempt1[0]!.qaScore);
+        expect(attempt1[0]!.result).toBe(qa >= 7 ? 'PASS' : 'RETRY');
+      },
+      20_000
+    );
+  });
 });

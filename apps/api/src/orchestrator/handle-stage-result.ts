@@ -11,7 +11,6 @@ import { logger } from '../lib/logger';
 // every stage rather than per-stage overrides.
 export const QA_PASS_THRESHOLD = 7;
 export const MAX_CONTENT_RETRIES = 2; // exported so logo_composite's and poster's own retry loops (run-deterministic-stage.ts) stay in sync with this value instead of duplicating the magic number
-const RECORD_NOT_FOUND = 'P2025'; // Prisma's error code for "no row matched the update"
 
 type Tx = Parameters<Parameters<typeof db.$transaction>[0]>[0];
 type JobRow = Awaited<ReturnType<typeof db.job.findUniqueOrThrow>>;
@@ -51,6 +50,26 @@ export async function handleStageResult(
 ): Promise<void> {
   let postCommit: PostCommitAction;
 
+  // Cheap pre-check, outside the transaction and deliberately racy: the
+  // authoritative guard is the atomic claim inside. This exists purely
+  // so the COMMON duplicate case costs nothing. A real re-delivery
+  // arrives seconds to minutes after the original (BullMQ redelivers
+  // after a stall, not simultaneously), so by then this read sees the
+  // completed row and returns immediately - instead of opening a
+  // transaction that blocks on the already-decided row's lock and burns
+  // Prisma's 5s interactive-transaction timeout before failing.
+  const existing = await db.stageAttempt.findFirst({
+    where: { jobId, stage, attemptNumber },
+    select: { completedAt: true },
+  });
+  if (existing?.completedAt) {
+    logger.warn(
+      { job_id: jobId, stage, attempt_number: attemptNumber, qa_score: result.qaScore },
+      'stage_result_already_recorded'
+    );
+    return;
+  }
+
   // LLD §4.3: the read-decide-write cycle is transaction-scoped to this
   // job's row, so two concurrent events for the same job can never race
   // each other into a lost update. Kept deliberately fast (DB writes
@@ -58,8 +77,23 @@ export async function handleStageResult(
   await db.$transaction(async (tx) => {
     const job = await tx.job.findUniqueOrThrow({ where: { id: jobId } });
 
-    await tx.stageAttempt.update({
-      where: { jobId_stage_attemptNumber: { jobId, stage, attemptNumber } },
+    // Atomic claim, not a blind update: only an attempt that is still
+    // in-flight (completedAt null) may be decided, and exactly one
+    // caller can win. Real incident (job 3106ae7d): BullMQ re-delivered
+    // base_asset attempt 1 after a downstream crash was misattributed to
+    // it, this function ran a SECOND time for the same attempt, and
+    // overwrote a recorded PASS 8/10 with RETRY 6/10 - the QA judge is
+    // non-deterministic, so the re-run legitimately disagreed with
+    // itself. The job then both advanced (logo_composite -> poster) AND
+    // retried (base_asset attempt 2), producing two live branches of one
+    // pipeline that later collided.
+    //
+    // updateMany rather than update specifically so completedAt: null
+    // can be part of the WHERE - one statement, so two concurrent
+    // handlers cannot both pass the check. count === 0 means someone
+    // else already recorded this attempt's outcome.
+    const claimed = await tx.stageAttempt.updateMany({
+      where: { jobId, stage, attemptNumber, completedAt: null },
       data: {
         modelUsed: result.modelUsed,
         latencyMs: result.latencyMs,
@@ -85,6 +119,18 @@ export async function handleStageResult(
         result: result.qaScore >= QA_PASS_THRESHOLD ? 'PASS' : attemptNumber < MAX_CONTENT_RETRIES ? 'RETRY' : 'ESCALATED',
       },
     });
+
+    if (claimed.count === 0) {
+      // Already decided by an earlier call (duplicate worker delivery,
+      // or a re-run of an attempt that had completed). Do NOT re-decide:
+      // the first outcome already advanced, retried or escalated this
+      // job, and doing it again is exactly what forked job 3106ae7d.
+      logger.warn(
+        { job_id: jobId, stage, attempt_number: attemptNumber, qa_score: result.qaScore },
+        'stage_result_already_recorded'
+      );
+      return;
+    }
 
     logger.info({
       job_id: jobId,
@@ -286,30 +332,39 @@ export async function escalateTechnicalFailure(
   stage: string,
   attemptNumber: number,
   errorMessage: string,
-  assetUrl?: string
+  assetUrl?: string,
+  /** Replaces the "Technical failure after retries exhausted" framing
+   *  for callers where that wording would be wrong - the orphan reaper,
+   *  where nothing failed and no retries were exhausted; the attempt was
+   *  simply abandoned mid-flight. */
+  reasoningPrefix = 'Technical failure after retries exhausted'
 ): Promise<void> {
   const reasoning = assetUrl
-    ? `Technical failure after retries exhausted: ${errorMessage} (the image itself generated successfully - only QA scoring failed)`
-    : `Technical failure after retries exhausted: ${errorMessage}`;
+    ? `${reasoningPrefix}: ${errorMessage} (the image itself generated successfully - only QA scoring failed)`
+    : `${reasoningPrefix}: ${errorMessage}`;
 
-  try {
-    await db.stageAttempt.update({
-      where: { jobId_stage_attemptNumber: { jobId, stage, attemptNumber } },
-      data: { completedAt: new Date(), result: 'ESCALATED', qaReasoning: reasoning, assetUrl: assetUrl ?? undefined },
-    });
-  } catch (err: any) {
-    if (err?.code === RECORD_NOT_FOUND) {
-      // This fires asynchronously, after BullMQ's own backoff (up to
-      // several seconds across 3 attempts) - by the time it runs, the
-      // stage's attempt rows can legitimately be gone already (a manual
-      // retry via retryStuckJob() deletes and redispatches this exact
-      // stage before an old in-flight attempt has finished failing).
-      // Racing a dead attempt is not a bug to surface; updating it would
-      // just resurrect a row a newer dispatch already superseded.
-      logger.warn({ job_id: jobId, stage, attempt_number: attemptNumber }, 'escalate_technical_failure_stale_attempt');
-      return;
-    }
-    throw err;
+  // Scoped to completedAt: null so this can only ever resolve an attempt
+  // that is genuinely still in flight. Two reasons: (1) the orphan reaper
+  // decides to escalate from a query taken moments earlier, and the
+  // attempt may have completed in between - it must not clobber a real
+  // recorded outcome; (2) it makes this write symmetric with
+  // handleStageResult()'s own atomic claim, so exactly one of the two
+  // can ever decide a given attempt.
+  const escalated = await db.stageAttempt.updateMany({
+    where: { jobId, stage, attemptNumber, completedAt: null },
+    data: { completedAt: new Date(), result: 'ESCALATED', qaReasoning: reasoning, assetUrl: assetUrl ?? undefined },
+  });
+
+  if (escalated.count === 0) {
+    // Either the attempt row is gone, or it already has an outcome.
+    // Both are benign races, not bugs to surface: this fires
+    // asynchronously (after BullMQ's backoff across 3 attempts, or from
+    // the reaper's periodic sweep), and by then a manual retry via
+    // retryStuckJob() may have deleted and redispatched this exact
+    // stage, or the work may have finished normally. Writing anyway
+    // would resurrect a superseded row or overwrite a real result.
+    logger.warn({ job_id: jobId, stage, attempt_number: attemptNumber }, 'escalate_technical_failure_stale_attempt');
+    return;
   }
 
   if (stage.startsWith('dimension_')) {

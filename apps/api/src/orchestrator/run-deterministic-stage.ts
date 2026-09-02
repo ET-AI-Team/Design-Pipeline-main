@@ -4,7 +4,8 @@ import type { Job } from '@prisma/client';
 import type { StageDefinition } from './types';
 import { uploadToCloudinary } from '../providers/cloudinary.client';
 import { db } from '../lib/db';
-import { handleStageResult, QA_PASS_THRESHOLD, MAX_CONTENT_RETRIES } from './handle-stage-result';
+import { logger } from '../lib/logger';
+import { handleStageResult, escalateTechnicalFailure, QA_PASS_THRESHOLD, MAX_CONTENT_RETRIES } from './handle-stage-result';
 import { getOrExtractStyle } from './render-poster';
 import { runFullContextEdit, buildVerificationRubric, type ExclusionBox } from './poster-text-edit';
 import { computeLogoDimensions, clampLogoPosition, logoPlacementConstraints } from './logo-placement';
@@ -132,13 +133,78 @@ export function capScoreIfAnyFieldFailed(
  * QA), not an unconditional pass.
  */
 export async function runDeterministicStage(stageDef: StageDefinition, job: Job, attemptNumber = 1): Promise<void> {
-  if (stageDef.name === 'poster') {
-    return runPosterStage(job, attemptNumber);
+  try {
+    if (stageDef.name === 'poster') {
+      await runPosterStage(job, attemptNumber);
+      return;
+    }
+    if (stageDef.name === 'logo_composite') {
+      await runLogoCompositeStage(job, attemptNumber);
+      return;
+    }
+    throw new Error(`No deterministic implementation for stage "${stageDef.name}"`);
+  } catch (err) {
+    // Never let an inline stage's failure escape into whatever called
+    // it. Real incident (job 3106ae7d): a crash inside the POSTER stage
+    // propagated out of this function, up through logo_composite's
+    // handleStageResult(), and into base_asset's BullMQ job - because
+    // handle-stage-result.ts awaits runDeterministicStage() inside the
+    // PREVIOUS stage's post-commit thunk. BullMQ then dutifully re-ran
+    // base_asset, a stage that had already passed and already been paid
+    // for, and its second QA run disagreed with its first - which is
+    // what split the job into two live branches.
+    //
+    // The stage that actually failed is the one that gets escalated, and
+    // nothing is rethrown. escalateTechnicalFailure() already writes the
+    // ESCALATED row, moves the job to NEEDS_ATTENTION and emits both
+    // socket events, so the job lands in the dashboard's Attention queue
+    // recoverable via POST /jobs/:id/retry.
+    //
+    // No BullMQ-style technical retry here on purpose: transient
+    // failures are already retried a layer down (lib/http-client.ts for
+    // provider calls, cloudinary.client.ts for uploads), so anything
+    // reaching this boundary is not transient.
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, job_id: job.id, stage: stageDef.name, attempt_number: attemptNumber }, 'deterministic_stage_failed');
+    await escalateTechnicalFailure(job.id, stageDef.name, attemptNumber, message);
   }
-  if (stageDef.name === 'logo_composite') {
-    return runLogoCompositeStage(job, attemptNumber);
+}
+
+const UNIQUE_CONSTRAINT_VIOLATION = 'P2002'; // Prisma's code for @@unique conflicts
+
+/**
+ * Claims one attempt of an inline stage by inserting its placeholder
+ * StageAttempt row, exactly as dispatchStageJob() does for queued
+ * stages. Returns false if this (jobId, stage, attemptNumber) is
+ * already claimed, so the caller can bail out before spending anything.
+ *
+ * The placeholder deliberately leaves completedAt null - that is what
+ * marks the attempt as in-flight for the dashboard, what
+ * handleStageResult()'s atomic claim keys off, and what the orphan
+ * reaper looks for.
+ */
+async function claimAttempt(jobId: string, stage: string, attemptNumber: number, startedAt: number): Promise<boolean> {
+  try {
+    await db.stageAttempt.create({
+      data: {
+        jobId,
+        stage,
+        attemptNumber,
+        modelUsed: '', // filled in once the stage actually completes
+        latencyMs: 0,
+        costInr: 0,
+        result: 'RETRY', // placeholder until the real pass/retry/escalate decision
+        startedAt: new Date(startedAt),
+      },
+    });
+    return true;
+  } catch (err: any) {
+    if (err?.code === UNIQUE_CONSTRAINT_VIOLATION) {
+      logger.warn({ job_id: jobId, stage, attempt_number: attemptNumber }, 'deterministic_stage_attempt_already_claimed');
+      return false;
+    }
+    throw err;
   }
-  throw new Error(`No deterministic implementation for stage "${stageDef.name}"`);
 }
 
 function buildLogoPlacementRubric(campaignBrief: string): string {
@@ -178,6 +244,23 @@ Respond ONLY with JSON: {"qaScore": number (0-10), "qaReasoning": string}.`;
  */
 async function runLogoCompositeStage(job: Job, attemptNumber: number): Promise<void> {
   const startedAt = Date.now();
+
+  // Claim this attempt BEFORE doing any paid work, and treat a
+  // uniqueness conflict as "someone else already owns this attempt" -
+  // the same guard dispatchStageJob() uses for queued stages, and the
+  // same claim-first ordering runPosterStage below already uses.
+  //
+  // Real incident (job 3106ae7d): this row used to be created at the
+  // very END of the stage, fully populated. Two advances raced (see
+  // handle-stage-result.ts's atomic claim for why that was possible),
+  // the second one re-ran the whole stage - a vision call, a sharp
+  // composite and a second vision QA, all real spend - and only then hit
+  // P2002 on the create, throwing after the money was gone. Claiming
+  // first turns that into a free no-op instead of a paid crash, and
+  // guarantees a row exists for escalateTechnicalFailure() to write to
+  // (it silently gives up on P2025 when there is none).
+  if (!(await claimAttempt(job.id, 'logo_composite', attemptNumber, startedAt))) return;
+
   emitStatusChanged(job.id, 'LOGO_PLACEMENT_DETECTING');
 
   const [baseAssetBuffer, logoBuffer, previousAttempt] = await Promise.all([
@@ -261,11 +344,13 @@ async function runLogoCompositeStage(job: Job, attemptNumber: number): Promise<v
   const totalCost = detection.costInr + qa.costInr;
   const result = qa.qaScore >= QA_PASS_THRESHOLD ? 'PASS' : attemptNumber < MAX_CONTENT_RETRIES ? 'RETRY' : 'ESCALATED';
 
-  await db.stageAttempt.create({
+  // Update, not create - the row was already claimed at the top of this
+  // function. completedAt is deliberately left alone here and set by
+  // handleStageResult() below, so its atomic "only decide an attempt
+  // once" claim still sees this attempt as in-flight.
+  await db.stageAttempt.update({
+    where: { jobId_stage_attemptNumber: { jobId: job.id, stage: 'logo_composite', attemptNumber } },
     data: {
-      jobId: job.id,
-      stage: 'logo_composite',
-      attemptNumber,
       modelUsed: 'sharp (composite) + gpt-4.1 (position + QA)',
       latencyMs: Date.now() - startedAt,
       costInr: totalCost,
@@ -274,8 +359,6 @@ async function runLogoCompositeStage(job: Job, attemptNumber: number): Promise<v
       assetUrl: upload.secureUrl,
       qaReasoning: qa.qaReasoning,
       result,
-      startedAt: new Date(startedAt),
-      completedAt: new Date(),
     },
   });
 
@@ -316,19 +399,10 @@ async function runPosterStage(job: Job, attemptNumber: number): Promise<void> {
   // Placeholder row first, same reason dispatchStageJob() does this for
   // queued stages: style extraction + copy generation + the edit call +
   // QA below all take real seconds, and the dashboard should show
-  // "in progress" rather than nothing while that runs.
-  await db.stageAttempt.create({
-    data: {
-      jobId: job.id,
-      stage: 'poster',
-      attemptNumber,
-      modelUsed: '',
-      latencyMs: 0,
-      costInr: 0,
-      result: 'RETRY',
-      startedAt: new Date(startedAt),
-    },
-  });
+  // "in progress" rather than nothing while that runs. Shares
+  // claimAttempt() with logo_composite so both inline stages get the
+  // same duplicate-claim protection.
+  if (!(await claimAttempt(job.id, 'poster', attemptNumber, startedAt))) return;
 
   const baseLayerSpec = job.baseLayerSpecJson as unknown as BaseLayerSpec | null;
   if (!baseLayerSpec) {

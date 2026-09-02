@@ -368,6 +368,23 @@ export interface GenerateAdCopyResult extends AdCopy {
 // actually distinguish "is this really a compound word" - something
 // this function has no reliable way to know.
 function stripDashesCore(text: string, allowLeadingStrip: boolean, allowTrailingStrip: boolean): string {
+  // Real incident (job 3106ae7d): a null INSIDE trustItems/
+  // otherElementTexts/headlineLines reached here and threw "null is not
+  // an object (evaluating 'text.replace')", which crashed the poster
+  // stage mid-pipeline. The scalar copy fields below are all truthiness-
+  // guarded at their call site, but the array fields are .map()'d
+  // straight in, so a null element had nothing protecting it.
+  //
+  // This isn't malformed input to defend against grudgingly - it is
+  // exactly what generateAdCopy's own prompt ASKS FOR ("return null for
+  // that field, or an empty string for the matching entry in
+  // otherElementTexts"). The prompt instructs nulls, so the primitive
+  // that consumes them has to tolerate them, rather than every call site
+  // remembering to. Empty string, not a throw: an absent copy field is
+  // a normal, expected outcome, and the callers below already treat ''
+  // and undefined as "nothing to render".
+  if (typeof text !== 'string') return '';
+
   return text
     .replace(/\s*[-‐-―]\s*/g, (match, offset: number, full: string) => {
       const atStart = offset === 0;
@@ -405,13 +422,25 @@ export function stripDashesFromLines(lines: string[]): string[] {
 
 function stripDashesFromCopy(copy: AdCopy): AdCopy {
   return {
-    headlineLines: stripDashesFromLines(copy.headlineLines),
+    headlineLines: stripDashesFromLines(Array.isArray(copy.headlineLines) ? copy.headlineLines : []),
     subtext: copy.subtext ? stripDashes(copy.subtext) : copy.subtext,
     ctaLabel: copy.ctaLabel ? stripDashes(copy.ctaLabel) : copy.ctaLabel,
     priceText: copy.priceText ? stripDashes(copy.priceText) : copy.priceText,
-    trustItems: copy.trustItems.map(stripDashes),
+    // Nulls/blanks inside these arrays are an instructed outcome (see
+    // stripDashesCore) and become '' there. trustItems is a plain list,
+    // so a dropped item is simply one fewer trust point - filtered.
+    trustItems: (copy.trustItems ?? []).map(stripDashes).filter((s) => s.length > 0),
     promoBadgeText: copy.promoBadgeText ? stripDashes(copy.promoBadgeText) : copy.promoBadgeText,
-    otherElementTexts: copy.otherElementTexts.map(stripDashes),
+    // otherElementTexts is deliberately NOT filtered: it is a PARALLEL
+    // array indexed against GenerateAdCopyParams.otherElementPrompts
+    // (poster-text-edit.ts consumes it strictly by index, with no index
+    // metadata of its own). Dropping a blank entry here would shift
+    // every later element's copy onto the wrong design element. Blanks
+    // must stay as '' and be skipped at render time, not compacted.
+    // headlineLines above is positional for the same reason - and it
+    // additionally had no array-level guard at all, so a response
+    // missing the key entirely used to reach .map() on undefined.
+    otherElementTexts: (copy.otherElementTexts ?? []).map(stripDashes),
   };
 }
 

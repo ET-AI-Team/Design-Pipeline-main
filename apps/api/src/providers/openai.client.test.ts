@@ -291,3 +291,35 @@ describe('buildDimensionRecompositionPrompt', () => {
     expect(prompt).toContain('match the existing background exactly');
   });
 });
+
+describe('stripDashes null-safety (regression: job 3106ae7d)', () => {
+  // Root cause of a real incident: a null INSIDE one of the ad-copy
+  // ARRAY fields reached stripDashesCore and threw "null is not an
+  // object (evaluating 'text.replace')". That crash happened inside the
+  // poster stage but surfaced as a base_asset worker failure, which
+  // BullMQ then re-ran, which forked the job into two live branches.
+  //
+  // Critically this is not malformed input to shrug at - generateAdCopy's
+  // own prompt instructs the model to "return null for that field (or an
+  // empty string for the matching entry in otherElementTexts)". The
+  // prompt asks for nulls, so the sanitiser has to accept them.
+  it('returns empty string for null instead of throwing', () => {
+    expect(stripDashes(null as unknown as string)).toBe('');
+  });
+
+  it('returns empty string for undefined instead of throwing', () => {
+    expect(stripDashes(undefined as unknown as string)).toBe('');
+  });
+
+  it('survives a null element inside an array field, the exact shape that crashed the pipeline', () => {
+    const items = ['Doctor approved', null, 'Flexible timing'] as unknown as string[];
+    expect(() => items.map(stripDashes)).not.toThrow();
+    expect(items.map(stripDashes)).toEqual(['Doctor approved', '', 'Flexible timing']);
+  });
+
+  it('stripDashesFromLines survives a null line', () => {
+    const lines = ['Lower back pain', null] as unknown as string[];
+    expect(() => stripDashesFromLines(lines)).not.toThrow();
+    expect(stripDashesFromLines(lines)).toEqual(['Lower back pain', '']);
+  });
+});
