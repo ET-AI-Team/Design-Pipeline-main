@@ -1,25 +1,57 @@
-name: CI
+# CI/CD for design-pipeline.
+#
+# ─────────────────────────────────────────────────────────────────────────
+# DEPLOY ORDER: DESIGN-PIPELINE FIRST, THEN THE WRAPPER (AI-Studio).
+#
+# No pipeline can check another repository's deployed version, so this is
+# a human rule enforced by reading it here.
+#
+# The wrapper consumes this service's API and validates every response
+# with a strict Zod schema, client-side. Unknown keys are stripped, but a
+# MISSING required key fails the whole parse - and it fails in the
+# browser, not at the server, so both services still return 200 while the
+# UI shows "Couldn't load this job's status" on every job. That is
+# exactly the state the box was in before this pipeline existed: the
+# wrapper expected `assetEdits` and `staleDimensions`, and the deployed
+# build did not return them.
+#
+# Therefore: ADDING a field to a response is backward compatible and safe
+# to ship first. REMOVING or RENAMING one is not - ship the wrapper's
+# tolerance for it before the change lands here.
+# ─────────────────────────────────────────────────────────────────────────
+
+name: CI/CD
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
   workflow_dispatch:
-
-# A newer push to the same branch makes the in-flight run pointless.
-# main is exempt: those runs are the record of what actually landed.
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    inputs:
+      dry_run:
+        description: 'Dry run - report what would deploy, change nothing on the box'
+        type: boolean
+        default: true
 
 env:
-  BUN_VERSION: '1.3.14'
+  # Pinned, never "latest": CI's job is to predict production, which it
+  # cannot do on a floating runtime. This matches the bun on the deploy
+  # host (/data/abhigyan.raj/.bun/bin/bun, 1.4.0). The repo's lockfile was
+  # written by 1.3.14; --frozen-lockfile resolves it fine on 1.4.0, as
+  # independently confirmed on the wrapper repo (runs #9 and #10).
+  BUN_VERSION: '1.4.0'
+  DEPLOY_DIR: /data/abhigyan.raj/Design-Pipeline-main
+  SERVICE: design-pipeline
+  HEALTH_URL: http://127.0.0.1:8080/health
 
 jobs:
-  # Fast feedback, no service containers: if the types are wrong there is
-  # no point paying for a Postgres boot to find out.
-  checks:
-    name: Typecheck & build
+  # ───────────────────────── verify ─────────────────────────
+  # Hermetic. No DATABASE_URL, no provider keys, no services. If a test
+  # needs a real backing service it belongs in `integration` below, not
+  # here - this job's value is that it cannot be flaky for environmental
+  # reasons.
+  verify:
+    name: Verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -32,31 +64,60 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # tsc reads the generated Prisma types, and nothing generates them
-      # implicitly - there is no postinstall hook in this repo, so without
-      # this step every db.* reference fails to typecheck. Run through the
-      # package script, not `bunx prisma`: bunx re-fetches the CLI and was
-      # observed failing on a tarball integrity error, while `bun run`
-      # uses the already-installed workspace binary and never hits the
-      # network.
+      # tsc reads the generated Prisma types and nothing generates them
+      # implicitly - this repo has no postinstall hook, so without this
+      # every db.* reference fails to typecheck. Run via the package
+      # script, not `bunx prisma`: bunx re-fetches the CLI and was seen
+      # failing on a tarball integrity error, while `bun run` uses the
+      # already-installed workspace binary and never hits the network.
       - name: Generate Prisma client
         run: bun run --cwd apps/api prisma:generate
 
       - name: Typecheck (api + dashboard + shared-types)
         run: bun run typecheck
 
+      # NOTE: there is deliberately no lint step. This repo defines no
+      # lint script in any of its three packages. Adding one is a real
+      # change with real churn, so it is a separate piece of work rather
+      # than something invented here to fill a slot.
+
+      # Only the tests that need no database and no Redis. The rest run in
+      # `integration`. Splitting like this keeps a genuine fast-fail: a
+      # broken type or a broken pure unit test should not wait on a
+      # Postgres container to boot.
+      - name: Unit tests
+        run: |
+          bun test \
+            apps/api/src/app.test.ts \
+            apps/api/src/lib/http-client.test.ts \
+            apps/api/src/lib/logger.test.ts \
+            apps/api/src/orchestrator/plan-asset-edit.test.ts \
+            apps/api/src/orchestrator/poster-text-edit.test.ts \
+            apps/api/src/orchestrator/render-poster.test.ts \
+            apps/api/src/orchestrator/run-deterministic-stage.test.ts \
+            apps/api/src/providers/gemini.client.test.ts \
+            apps/api/src/providers/openai.client.test.ts \
+            apps/api/src/stages/base-asset.stage.test.ts \
+            apps/api/src/stages/generate-and-score.test.ts \
+            apps/api/src/stages/index.test.ts \
+            packages/shared-types
+
       - name: Build dashboard
         run: bun run --cwd apps/dashboard build
 
-  test:
-    name: Tests
+  # ─────────────────────── integration ───────────────────────
+  # The rest of the suite writes Job/StageAttempt rows and pushes BullMQ
+  # jobs, so it needs a real Postgres and a real Redis. Both are
+  # throwaway containers that die with the runner.
+  #
+  # This must NEVER be pointed at Supabase. These tests create and mutate
+  # real rows, and - verified while setting this up - the deploy host and
+  # local development already share that one production database.
+  integration:
+    name: Integration tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    # Real Postgres and Redis, thrown away with the runner. The suite is
-    # genuinely integration-level - it writes Job/StageAttempt rows and
-    # pushes BullMQ jobs - so it needs both, and it must NEVER be pointed
-    # at the Supabase database: these tests create and mutate real rows.
     services:
       postgres:
         image: postgres:16-alpine
@@ -88,10 +149,10 @@ jobs:
       DIRECT_URL: postgresql://postgres:postgres@localhost:5432/design_pipeline_test
       REDIS_URL: redis://localhost:6379
 
-      # Deliberately fake. Verified: the suite does not make a single real
-      # provider call - 127 tests pass with these exact placeholder values
-      # and no network. Putting real keys here would risk a test spending
-      # money, and CI is the last place that should be possible.
+      # Deliberately fake, and load-bearing that they are. Verified: the
+      # suite makes no real provider call - 127 tests pass with these exact
+      # placeholders and no network. Real keys here would let a stray test
+      # spend money, and CI is the last place that should be possible.
       GEMINI_API_KEY: ci-placeholder
       OPENAI_API_KEY: ci-placeholder
       GEMINI_PRO_MODEL: gemini-3-pro-image
@@ -101,9 +162,7 @@ jobs:
       CLOUDINARY_CLOUD_NAME: ci-placeholder
       CLOUDINARY_API_KEY: ci-placeholder
       CLOUDINARY_API_SECRET: ci-placeholder
-
       NODE_ENV: test
-      PORT: '8080'
 
     steps:
       - uses: actions/checkout@v4
@@ -118,12 +177,162 @@ jobs:
       - name: Generate Prisma client
         run: bun run --cwd apps/api prisma:generate
 
-      # deploy, never `migrate dev`: dev would try to reconcile the schema
-      # against the database and offer to DROP tables. That is a real
-      # hazard in this repo - the live Supabase database carries seven
+      # deploy, never `migrate dev`: dev reconciles the schema against the
+      # database and can offer to DROP tables. That is a live hazard for
+      # this project - the production Supabase database carries seven
       # tables that schema.prisma does not model.
       - name: Apply migrations
         run: bun run --cwd apps/api prisma:deploy
 
-      - name: Run tests
+      - name: Full test suite
         run: bun test
+
+  # ───────────────────────── deploy ─────────────────────────
+  deploy:
+    name: Deploy to 10.71.77.228
+    needs: [verify, integration]
+    runs-on: [self-hosted, design-pipeline]
+    timeout-minutes: 15
+
+    # github.repository pins this to the canonical repo so a fork can
+    # never reach the box. Branch/event gate: main pushes and manual runs
+    # only - `development` gets CI but is never deployed.
+    if: >-
+      github.repository == 'ET-AI-Team/Design-Pipeline-main' &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        github.event_name == 'workflow_dispatch'
+      )
+
+    # cancel-in-progress is FALSE on purpose. A deploy cancelled partway
+    # through - between `migrate deploy` and the restart, say - leaves the
+    # box in a state no one designed. A queued deploy is strictly better
+    # than a half-applied one.
+    concurrency:
+      group: deploy-production-designpipeline
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        working-directory: /data/abhigyan.raj/Design-Pipeline-main
+
+    steps:
+      # ---- read-only, safe in a dry run ----
+
+      - name: Record current commit for rollback
+        id: prev
+        run: |
+          PREV=$(git rev-parse HEAD)
+          echo "sha=$PREV" >> "$GITHUB_OUTPUT"
+          echo "Currently deployed: $PREV"
+
+      # Refuses to deploy over an uncommitted production hand-edit. This
+      # is not hypothetical: the wrapper repo's first deploy found a real
+      # uncommitted cookie fix in auth.routes.ts that `git reset --hard`
+      # would have destroyed. Fail loudly and let a human decide.
+      - name: Refuse to clobber uncommitted changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Uncommitted changes exist in $DEPLOY_DIR - refusing to reset --hard over them."
+            git status --porcelain
+            echo "--- diff ---"
+            git --no-pager diff
+            exit 1
+          fi
+          echo "Working tree clean."
+
+      # Read-only: updates remote-tracking refs, never the working tree.
+      # Safe to run before the dry-run gate.
+      - name: Fetch
+        run: git fetch --all --prune
+
+      - name: Report what would change
+        run: |
+          echo "HEAD:        $(git rev-parse --short HEAD)"
+          echo "origin/main: $(git rev-parse --short origin/main)"
+          echo "--- commits that would land ---"
+          git --no-pager log --oneline HEAD..origin/main || true
+
+      # `exit 0` in a step would NOT stop the steps after it - it just ends
+      # that one step successfully, and the deploy would carry on. So the
+      # mode is computed once here and every mutating step below is gated
+      # on it individually. Getting this wrong makes "dry run" deploy for
+      # real, which is the worst possible failure mode for this input.
+      - name: Decide whether this run may mutate the box
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "dry=true" >> "$GITHUB_OUTPUT"
+            echo "DRY RUN - the working tree, node_modules, database and service will be left untouched."
+          else
+            echo "dry=false" >> "$GITHUB_OUTPUT"
+            echo "LIVE DEPLOY - the box will be updated."
+          fi
+
+      # ---- everything below MUTATES the box ----
+      #
+      # The reset lives BELOW the dry-run gate deliberately. The wrapper
+      # repo's workflow has it above, which means a "dry" run still moves
+      # its deploy checkout to origin/main and only skips migrate and
+      # restart. That is not a dry run. This one changes nothing.
+
+      - name: Reset to origin/main
+        if: steps.mode.outputs.dry != 'true'
+        run: |
+          git reset --hard origin/main
+          echo "Now at: $(git rev-parse HEAD)"
+
+      - name: Install dependencies
+        if: steps.mode.outputs.dry != 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Generate Prisma client
+        if: steps.mode.outputs.dry != 'true'
+        run: bun run --cwd apps/api prisma:generate
+
+      # Migrations run BEFORE the restart: the new code must never meet a
+      # schema that predates it. Additive-only by policy, so the old code
+      # tolerates the new columns during the seconds between these steps.
+      - name: Apply migrations
+        if: steps.mode.outputs.dry != 'true'
+        run: bun run --cwd apps/api prisma:deploy
+
+      - name: Restart service
+        if: steps.mode.outputs.dry != 'true'
+        run: sudo systemctl restart ${{ env.SERVICE }}
+
+      # Poll, never a single curl: the service takes a few seconds to bind
+      # its port, and a check fired immediately after `systemctl restart`
+      # returns 000 against a service that is perfectly fine.
+      - name: Health check
+        if: steps.mode.outputs.dry != 'true'
+        run: |
+          for i in $(seq 1 20); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$HEALTH_URL" || echo 000)
+            echo "[$i/20] $HEALTH_URL -> $CODE"
+            if [ "$CODE" = "200" ]; then
+              echo "Healthy after ~$((i * 2))s."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Service did not return 200 within ~40s."
+          exit 1
+
+      # ---- rollback ----
+      #
+      # Deliberately NO health check here. The commit being restored may
+      # predate /health entirely (it was added by the very release this
+      # pipeline first shipped), so probing it would report a failure
+      # against a service that came back perfectly. The restart either
+      # succeeds or systemctl itself fails.
+      - name: Roll back on failure
+        if: failure() && steps.mode.outputs.dry != 'true'
+        run: |
+          echo "::error::Deploy failed - rolling back to ${{ steps.prev.outputs.sha }}"
+          git reset --hard "${{ steps.prev.outputs.sha }}"
+          bun install --frozen-lockfile
+          bun run --cwd apps/api prisma:generate
+          sudo systemctl restart ${{ env.SERVICE }}
+          echo "::warning::Rolled back to ${{ steps.prev.outputs.sha }}. The box is on the PREVIOUS build."
+          echo "Migrations are NOT rolled back - they are additive by policy, so the older code ignores any new columns."
