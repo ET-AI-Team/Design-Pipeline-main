@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from 'bun:test';
 import { createServer } from 'node:http';
 import { db } from '../lib/db';
 import { retryStuckJob } from './retry-stuck-job';
-import { registerStage } from './stage-registry';
+import { registerStage, unregisterStageForTest } from './stage-registry';
 import { attachSocketServer } from '../realtime/socket-server';
 
 registerStage({
@@ -38,6 +38,12 @@ describe('retryStuckJob', () => {
 
   afterAll(() => {
     httpServer.close();
+    // Take the fake stage back out of the process-global registry.
+    // Without this it leaks into every other test file sharing the
+    // process, and stages/index.test.ts - which asserts the registry's
+    // EXACT contents - fails depending on file order.
+    unregisterStageForTest('retry_test_stage');
+    unregisterStageForTest('retry_test_deterministic_stage');
   });
 
   afterEach(async () => {

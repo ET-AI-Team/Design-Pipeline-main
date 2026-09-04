@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { db } from '../lib/db';
-import { registerStage } from '../orchestrator/stage-registry';
+import { registerStage, unregisterStageForTest } from '../orchestrator/stage-registry';
 import { dispatchStageJob } from '../queues/dispatch';
 import type { StageResult } from '../orchestrator/types';
 // Side-effect import: starts the real Worker instances, exactly as
@@ -59,6 +59,11 @@ describe('pipeline worker end-to-end', () => {
   afterAll(async () => {
     await db.stageAttempt.deleteMany({ where: { jobId } });
     await db.job.delete({ where: { id: jobId } });
+    // Take the fake stage back out of the process-global registry.
+    // Without this it leaks into every other test file sharing the
+    // process, and stages/index.test.ts - which asserts the registry's
+    // EXACT contents - fails depending on file order.
+    unregisterStageForTest(TEST_STAGE);
   });
 
   it(

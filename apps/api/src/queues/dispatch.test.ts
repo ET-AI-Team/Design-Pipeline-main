@@ -1,7 +1,7 @@
 import { describe, it, expect, afterAll, beforeAll } from 'bun:test';
 import { db } from '../lib/db';
 import { dispatchStageJob } from './dispatch';
-import { registerStage } from '../orchestrator/stage-registry';
+import { registerStage, unregisterStageForTest } from '../orchestrator/stage-registry';
 
 // The readme's original test dispatched a stage named 'base_asset'
 // without ever registering it - dispatchStageJob() calls
@@ -54,6 +54,11 @@ describe('dispatchStageJob idempotency', () => {
   afterAll(async () => {
     await db.stageAttempt.deleteMany({ where: { jobId } });
     await db.job.delete({ where: { id: jobId } });
+    // Take the fake stage back out of the process-global registry.
+    // Without this it leaks into every other test file sharing the
+    // process, and stages/index.test.ts - which asserts the registry's
+    // EXACT contents - fails depending on file order.
+    unregisterStageForTest(DUMMY_STAGE);
     // Deliberately NOT closing imageGenerationQueue/redisConnection/db here
     // (the readme's original test did) - these are process-wide singletons
     // from queue-definitions.ts and db.ts, shared by every other test file.
