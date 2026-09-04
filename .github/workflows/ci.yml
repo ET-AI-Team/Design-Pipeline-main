@@ -226,20 +226,31 @@ jobs:
           echo "sha=$PREV" >> "$GITHUB_OUTPUT"
           echo "Currently deployed: $PREV"
 
-      # Refuses to deploy over an uncommitted production hand-edit. This
-      # is not hypothetical: the wrapper repo's first deploy found a real
+      # Refuses to deploy over an uncommitted production hand-edit. Not
+      # hypothetical: the wrapper repo's first deploy found a real
       # uncommitted cookie fix in auth.routes.ts that `git reset --hard`
-      # would have destroyed. Fail loudly and let a human decide.
+      # would have destroyed.
+      #
+      # TRACKED changes only (-uno). `git reset --hard` does not touch
+      # untracked files, so blocking on them would be wrong - and it would
+      # block in practice: this box carries an untracked .env.bak.* that
+      # reset leaves alone. Untracked files are reported, never fatal.
       - name: Refuse to clobber uncommitted changes
         run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "::error::Uncommitted changes exist in $DEPLOY_DIR - refusing to reset --hard over them."
-            git status --porcelain
+          if [ -n "$(git status --porcelain -uno)" ]; then
+            echo "::error::Tracked files are modified in $DEPLOY_DIR - refusing to reset --hard over them."
+            git status --porcelain -uno
             echo "--- diff ---"
             git --no-pager diff
             exit 1
           fi
-          echo "Working tree clean."
+          echo "No tracked modifications."
+
+          UNTRACKED="$(git ls-files --others --exclude-standard)"
+          if [ -n "$UNTRACKED" ]; then
+            echo "::notice::Untracked files present (reset --hard will NOT remove these):"
+            echo "$UNTRACKED"
+          fi
 
       # Read-only: updates remote-tracking refs, never the working tree.
       # Safe to run before the dry-run gate.
