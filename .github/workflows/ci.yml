@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes the in-flight run pointless.
+# main is exempt: those runs are the record of what actually landed.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  BUN_VERSION: '1.3.14'
+
+jobs:
+  # Fast feedback, no service containers: if the types are wrong there is
+  # no point paying for a Postgres boot to find out.
+  checks:
+    name: Typecheck & build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # tsc reads the generated Prisma types, and nothing generates them
+      # implicitly - there is no postinstall hook in this repo, so without
+      # this step every db.* reference fails to typecheck. Run through the
+      # package script, not `bunx prisma`: bunx re-fetches the CLI and was
+      # observed failing on a tarball integrity error, while `bun run`
+      # uses the already-installed workspace binary and never hits the
+      # network.
+      - name: Generate Prisma client
+        run: bun run --cwd apps/api prisma:generate
+
+      - name: Typecheck (api + dashboard + shared-types)
+        run: bun run typecheck
+
+      - name: Build dashboard
+        run: bun run --cwd apps/dashboard build
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Real Postgres and Redis, thrown away with the runner. The suite is
+    # genuinely integration-level - it writes Job/StageAttempt rows and
+    # pushes BullMQ jobs - so it needs both, and it must NEVER be pointed
+    # at the Supabase database: these tests create and mutate real rows.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: design_pipeline_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Ephemeral CI database. Same string for both: DIRECT_URL exists
+      # only because Supabase needs migrations to bypass its pooler, and
+      # a plain Postgres container has no pooler to bypass.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/design_pipeline_test
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/design_pipeline_test
+      REDIS_URL: redis://localhost:6379
+
+      # Deliberately fake. Verified: the suite does not make a single real
+      # provider call - 127 tests pass with these exact placeholder values
+      # and no network. Putting real keys here would risk a test spending
+      # money, and CI is the last place that should be possible.
+      GEMINI_API_KEY: ci-placeholder
+      OPENAI_API_KEY: ci-placeholder
+      GEMINI_PRO_MODEL: gemini-3-pro-image
+      GEMINI_FLASH_MODEL: gemini-flash-latest
+      OPENAI_VISION_MODEL: gpt-4.1
+      OPENAI_IMAGE_EDIT_MODEL: gpt-image-2
+      CLOUDINARY_CLOUD_NAME: ci-placeholder
+      CLOUDINARY_API_KEY: ci-placeholder
+      CLOUDINARY_API_SECRET: ci-placeholder
+
+      NODE_ENV: test
+      PORT: '8080'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: bun run --cwd apps/api prisma:generate
+
+      # deploy, never `migrate dev`: dev would try to reconcile the schema
+      # against the database and offer to DROP tables. That is a real
+      # hazard in this repo - the live Supabase database carries seven
+      # tables that schema.prisma does not model.
+      - name: Apply migrations
+        run: bun run --cwd apps/api prisma:deploy
+
+      - name: Run tests
+        run: bun test
