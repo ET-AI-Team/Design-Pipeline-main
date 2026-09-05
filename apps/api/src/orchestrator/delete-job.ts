@@ -29,7 +29,11 @@ export async function deleteJob(jobId: string): Promise<void> {
   });
   if (!job) throw new ApiError('JOB_NOT_FOUND', 404, `No job with id ${jobId}`);
 
-  const urls = new Set<string>([job.reference1Url, job.reference2Url, job.logoUrl]);
+  // Filtered, not spread blindly: logoUrl is '' on a job created without
+  // a logo, and reference URLs are '' for the few seconds before
+  // finalizeJobCreation lands. Handing '' to Cloudinary is a guaranteed
+  // failed destroy that only shows up as a warn line.
+  const urls = new Set<string>([job.reference1Url, job.reference2Url, job.logoUrl].filter(Boolean));
   if (job.baseAssetUrl) urls.add(job.baseAssetUrl);
   if (job.posterUrl) urls.add(job.posterUrl);
   for (const attempt of job.stageAttempts) if (attempt.assetUrl) urls.add(attempt.assetUrl);

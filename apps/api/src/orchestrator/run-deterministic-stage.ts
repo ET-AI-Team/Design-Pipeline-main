@@ -261,6 +261,46 @@ async function runLogoCompositeStage(job: Job, attemptNumber: number): Promise<v
   // (it silently gives up on P2025 when there is none).
   if (!(await claimAttempt(job.id, 'logo_composite', attemptNumber, startedAt))) return;
 
+  // No logo supplied: record an explicit, zero-cost skip and hand the
+  // base_asset image straight through unchanged.
+  //
+  // Deliberately still a recorded attempt rather than rewiring
+  // base_asset.nextStageOnPass to point at 'poster'. Two reasons. The
+  // dashboard's PIPELINE_STAGES is a fixed list containing
+  // logo_composite, so a stage that never runs would render as
+  // permanently pending and make every logo-free job look stuck. And
+  // nextStageOnPass is a static string that handle-stage-result and
+  // retry-stuck-job both read - making it a function of the job would
+  // put a conditional in the middle of the orchestrator core to save
+  // one cheap no-op row.
+  //
+  // assetUrl is job.baseAssetUrl, so handleStageResult's
+  // "base_asset | logo_composite -> baseAssetUrl" write is a harmless
+  // self-assignment and the poster stage reads the plain photo.
+  if (!job.logoUrl) {
+    await db.stageAttempt.update({
+      where: { jobId_stage_attemptNumber: { jobId: job.id, stage: 'logo_composite', attemptNumber } },
+      data: {
+        modelUsed: 'skipped (no logo supplied)',
+        latencyMs: Date.now() - startedAt,
+        costInr: 0,
+        qaScore: null,
+        assetUrl: job.baseAssetUrl,
+        qaReasoning: 'No logo was supplied for this job, so there was nothing to place. The base image passes through unchanged.',
+        result: 'PASS',
+      },
+    });
+    await handleStageResult(job.id, 'logo_composite', attemptNumber, {
+      qaScore: QA_PASS_THRESHOLD,
+      qaReasoning: 'No logo supplied - stage skipped.',
+      assetUrl: job.baseAssetUrl ?? undefined,
+      modelUsed: 'skipped (no logo supplied)',
+      latencyMs: Date.now() - startedAt,
+      costInr: 0,
+    });
+    return;
+  }
+
   emitStatusChanged(job.id, 'LOGO_PLACEMENT_DETECTING');
 
   const [baseAssetBuffer, logoBuffer, previousAttempt] = await Promise.all([
@@ -530,7 +570,7 @@ async function runPosterStage(job: Job, attemptNumber: number): Promise<void> {
   // future retry can pin what already passed - see mergeCopyWithPrevious.
   const verification = await verifyPoster({
     imageUrl: upload.secureUrl,
-    rubricPrompt: buildVerificationRubric(adCopy, style),
+    rubricPrompt: buildVerificationRubric(adCopy, style, !!job.logoUrl),
     referenceImages: [
       { url: job.reference2Url, label: "The campaign's actual reference image - use it as a visual anchor for overall style/fidelity, on top of the text checks below." },
       // Real gap found live: without this, the "photo/logo unaltered"

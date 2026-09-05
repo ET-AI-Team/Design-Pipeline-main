@@ -9,7 +9,9 @@ import { emitStatusChanged, emitNeedsAttention } from '../realtime/emitters';
 export interface PendingJobUploads {
   reference1: Buffer;
   reference2: Buffer;
-  logo: Buffer;
+  /** Absent when the campaign has no brand mark to place. Everything
+   *  downstream keys off Job.logoUrl being '' rather than off this. */
+  logo?: Buffer;
 }
 
 /**
@@ -58,7 +60,8 @@ export async function finalizeJobCreation(jobId: string, uploads: PendingJobUplo
       Promise.all([
         uploadToCloudinary(uploads.reference1, { folder: 'references' }),
         uploadToCloudinary(uploads.reference2, { folder: 'references' }),
-        uploadToCloudinary(uploads.logo, { folder: 'logos' }),
+        // No logo is a supported campaign shape, not a missing input.
+        uploads.logo ? uploadToCloudinary(uploads.logo, { folder: 'logos' }) : Promise.resolve(null),
       ])
     );
 
@@ -67,7 +70,7 @@ export async function finalizeJobCreation(jobId: string, uploads: PendingJobUplo
       data: {
         reference1Url: ref1Upload.secureUrl,
         reference2Url: ref2Upload.secureUrl,
-        logoUrl: logoUpload.secureUrl,
+        logoUrl: logoUpload?.secureUrl ?? '',
         status: 'BASE_LAYER_CLASSIFYING',
       },
     });

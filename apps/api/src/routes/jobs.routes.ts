@@ -74,7 +74,11 @@ jobsRouter.post(
       const files = req.files as Record<string, Express.Multer.File[]>;
       const reference1 = assertFile(files.reference1?.[0], 'reference1', ACCEPTED_IMAGE_MIME_TYPES, MAX_REFERENCE_FILE_BYTES);
       const reference2 = assertFile(files.reference2?.[0], 'reference2', ACCEPTED_IMAGE_MIME_TYPES, MAX_REFERENCE_FILE_BYTES);
-      const logo = assertFile(files.logo?.[0], 'logo', ACCEPTED_LOGO_MIME_TYPES, MAX_LOGO_FILE_BYTES);
+      // Optional: a campaign may legitimately have no brand mark to
+      // place. Absent means the logo_composite stage records a
+      // zero-cost skip and every downstream prompt drops its logo
+      // language - see run-deterministic-stage.ts and poster-text-edit.ts.
+      const logo = assertOptionalFile(files.logo?.[0], 'logo', ACCEPTED_LOGO_MIME_TYPES, MAX_LOGO_FILE_BYTES);
       const { prompt } = (req as any).validatedBody;
 
       // Row first, uploads after - see finalize-job-creation.ts for the
@@ -89,6 +93,10 @@ jobsRouter.post(
         data: {
           reference1Url: '',
           reference2Url: '',
+          // '' here means "not uploaded yet"; after finalizeJobCreation it
+          // means "this job has no logo" - the two are never ambiguous in
+          // practice because finalization always completes before the
+          // first stage is dispatched.
           logoUrl: '',
           prompt,
           status: 'QUEUED',
@@ -104,7 +112,7 @@ jobsRouter.post(
       void finalizeJobCreation(job.id, {
         reference1: reference1.buffer,
         reference2: reference2.buffer,
-        logo: logo.buffer,
+        logo: logo?.buffer,
       }).catch((err) => logger.error({ err, job_id: job.id }, 'finalize_job_creation_unhandled'));
 
       res.status(201).json({ data: { jobId: job.id, status: job.status, createdAt: job.createdAt.toISOString() } });

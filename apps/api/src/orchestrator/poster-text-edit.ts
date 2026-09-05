@@ -522,7 +522,16 @@ export function buildFullContextEditPrompt(params: FullContextEditParams): strin
   // its own explicit, standalone rule rather than something only implied
   // by what wasn't said about Image 1.
   const manifestLines = [
-    '- Image 1: THE PHOTO YOU ARE EDITING. The only image whose content should end up in your output. It already has a brand logo correctly placed on it. Everything you generate is built directly on top of THIS exact photo, unchanged except for the new text/design elements described below.',
+    // The logo half is conditional: with no logo this used to assert
+    // "it already has a brand logo correctly placed on it", which is a
+    // false statement to an image model about the image it is editing -
+    // the likely result being that it helpfully invents one. Saying
+    // nothing is safer than either lying or naming the thing we don't
+    // want (this model has previously produced exactly what a prompt
+    // told it not to).
+    params.logoBox
+      ? '- Image 1: THE PHOTO YOU ARE EDITING. The only image whose content should end up in your output. It already has a brand logo correctly placed on it. Everything you generate is built directly on top of THIS exact photo, unchanged except for the new text/design elements described below.'
+      : '- Image 1: THE PHOTO YOU ARE EDITING. The only image whose content should end up in your output. Everything you generate is built directly on top of THIS exact photo, unchanged except for the new text/design elements described below.',
   ];
   params.referenceCrops.forEach((crop, i) => {
     manifestLines.push(
@@ -642,7 +651,7 @@ export function buildFullContextEditPrompt(params: FullContextEditParams): strin
 
   lines.push('\nDo NOT do any of the following, under any circumstances:');
   lines.push(
-    '- Do NOT alter the photograph or the logo in any way - not their color, position, size, or any other detail - and do NOT add any new physical object, prop, or accessory onto the subject or scene that wasn\'t already there (e.g. a race bib, a sign, a piece of clothing or jewelry) - even if the campaign brief or an attached reference image mentions or shows one; the photo is already final and must not gain new objects.'
+    `- Do NOT alter the photograph${params.logoBox ? ' or the logo' : ''} in any way - not ${params.logoBox ? 'their' : 'its'} color, position, size, or any other detail - and do NOT add any new physical object, prop, or accessory onto the subject or scene that wasn't already there (e.g. a race bib, a sign, a piece of clothing or jewelry) - even if the campaign brief or an attached reference image mentions or shows one; the photo is already final and must not gain new objects.`
   );
   lines.push(
     "- Do NOT let Image 1's own subject, clothing, pose, background, or landmark drift toward how a reference image (Image 2 onward) renders similar subject matter, even slightly - if they happen to look alike, that is a coincidence, not a cue to blend them. Image 1's photo content is the ONLY photo content allowed in your output."
@@ -688,10 +697,21 @@ export function buildFullContextEditPrompt(params: FullContextEditParams): strin
  * flat bullet list - see verifyPoster()'s own doc comment for why. The
  * substance of each check is unchanged; only the grouping is new.
  */
-export function buildVerificationRubric(copy: AdCopy, style: PosterStyleSpec): string {
+export function buildVerificationRubric(
+  copy: AdCopy,
+  style: PosterStyleSpec,
+  /** Whether this job actually has a brand logo on the canvas.
+   *
+   *  Defaults to true so every existing caller keeps its exact previous
+   *  behaviour - this is an addition, not a signature break. When false,
+   *  field 5 checks the photograph alone: a judge told to verify a logo
+   *  that was never placed will fail a perfectly correct poster for the
+   *  absence of something nobody asked for. */
+  hasLogo = true
+): string {
   const lines: string[] = [];
   lines.push(
-    'Verify this ad poster image against the 7 numbered checks below. Verify BOTH the exact text content and that the underlying photo and logo were not altered from what they should already be. These are 7 separate, independent checks - judge each one strictly on its own merits; a failure on one must never lower your judgment of a different one.'
+    `Verify this ad poster image against the 7 numbered checks below. Verify BOTH the exact text content and that the underlying photo${hasLogo ? ' and logo' : ''} ${hasLogo ? 'were' : 'was'} not altered from what ${hasLogo ? 'they' : 'it'} should already be. These are 7 separate, independent checks - judge each one strictly on its own merits; a failure on one must never lower your judgment of a different one.`
   );
   lines.push(
     'Word-for-word means every WORD must be present, unchanged, and in order. It does NOT mean punctuation has to match exactly - a missing/extra trailing period, comma, or other punctuation mark alone is NOT a failure and must NOT be scored down. It also does NOT mean capitalization has to match exactly - a word rendered in ALL CAPS or Title Case when the target string below uses different casing is the SAME word and is NOT a failure on its own; judge word identity by content, not by casing, exactly like punctuation. Only fail on missing words, added words, changed words, or misspellings.'
@@ -751,7 +771,13 @@ export function buildVerificationRubric(copy: AdCopy, style: PosterStyleSpec): s
   }
 
   lines.push(
-    "\n5. \"photoAndLogo\" - fails if the photo itself looks different from before this edit (a different scene, subject, lighting, or color treatment than what was already established, including any new physical object, prop, or accessory appearing on or near the subject that was not part of the original photo - e.g. a race bib, a new clothing item, jewelry, a sign), OR if the brand logo is covered, moved, resized, recolored, or otherwise altered from how it was already correctly placed."
+    // The field KEEPS its "photoAndLogo" name even with no logo: it is a
+    // stable key in the 7-field verdict object that verifyPoster parses
+    // and openai.client.ts's VerificationFields type declares. Renaming
+    // it per-job would make the response shape vary by input.
+    hasLogo
+      ? "\n5. \"photoAndLogo\" - fails if the photo itself looks different from before this edit (a different scene, subject, lighting, or color treatment than what was already established, including any new physical object, prop, or accessory appearing on or near the subject that was not part of the original photo - e.g. a race bib, a new clothing item, jewelry, a sign), OR if the brand logo is covered, moved, resized, recolored, or otherwise altered from how it was already correctly placed."
+      : "\n5. \"photoAndLogo\" - fails if the photo itself looks different from before this edit (a different scene, subject, lighting, or color treatment than what was already established, including any new physical object, prop, or accessory appearing on or near the subject that was not part of the original photo - e.g. a race bib, a new clothing item, jewelry, a sign)."
   );
 
   // Symmetric with buildFullContextEditPrompt's absence rules - a

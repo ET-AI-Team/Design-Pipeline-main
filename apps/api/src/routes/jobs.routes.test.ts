@@ -57,6 +57,52 @@ describe('jobs routes', () => {
     expect(body.error.code).toBe('VALIDATION_ERROR');
   });
 
+  // --- the logo is optional, but still validated when present ---
+  //
+  // There is deliberately NO "posts without a logo and expects 201" test.
+  // Reaching 201 creates a real Job row and fires finalizeJobCreation,
+  // which performs real Cloudinary uploads and dispatches the pipeline -
+  // roughly Rs 66 of real generation per run. The optional-ness is
+  // covered by the two boundary tests below plus the skip-path unit test,
+  // and end-to-end by a manual run against the live stack.
+  //
+  // Note assertFile/assertOptionalFile here check the DECLARED mimetype
+  // and size only - no content sniffing - so these fixtures need no real
+  // image bytes.
+  function blob(type: string): Blob {
+    return new Blob([new Uint8Array([1, 2, 3, 4])], { type });
+  }
+
+  it('POST /api/v1/jobs still rejects a logo of the wrong type - optional does not mean unvalidated', async () => {
+    const form = new FormData();
+    form.append('prompt', 'a prompt long enough to satisfy the schema here');
+    form.append('reference1', blob('image/png'), 'r1.png');
+    form.append('reference2', blob('image/png'), 'r2.png');
+    // JPEG is fine for a reference and wrong for a logo (PNG/SVG only).
+    form.append('logo', blob('image/jpeg'), 'logo.jpg');
+
+    const res = await fetch(`${baseUrl}/api/v1/jobs`, { method: 'POST', body: form });
+    expect(res.status).toBe(415);
+    const body = await res.json();
+    expect(body.error.code).toBe('UNSUPPORTED_FILE_TYPE');
+    expect(body.error.details.field).toBe('logo');
+  });
+
+  it('POST /api/v1/jobs keeps BOTH references mandatory - only the logo became optional', async () => {
+    // The guard against loosening the wrong field. reference2 in
+    // particular is load-bearing: it is the sole input to style
+    // extraction and base-layer classification.
+    const form = new FormData();
+    form.append('prompt', 'a prompt long enough to satisfy the schema here');
+    form.append('reference1', blob('image/png'), 'r1.png');
+    // reference2 and logo both absent - it must complain about reference2.
+    const res = await fetch(`${baseUrl}/api/v1/jobs`, { method: 'POST', body: form });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(body.error.details.field).toBe('reference2');
+  });
+
   it('GET /api/v1/jobs applies default pagination', async () => {
     const res = await fetch(`${baseUrl}/api/v1/jobs`);
     expect(res.status).toBe(200);

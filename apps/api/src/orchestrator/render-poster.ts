@@ -285,7 +285,9 @@ export async function getOrExtractStyle(
   const result = await analyzeReferenceStyle({
     referenceImageUrl: job.reference2Url,
     currentCompositeUrl: job.baseAssetUrl!,
-    logoUrl: job.logoUrl,
+    // '' when the job has no logo - analyzeReferenceStyle omits the
+    // image entirely rather than attaching a blank URL.
+    logoUrl: job.logoUrl || undefined,
     previousStyle: cached ?? undefined,
   });
   return { style: clampStyle(result.style), costInr: result.costInr };

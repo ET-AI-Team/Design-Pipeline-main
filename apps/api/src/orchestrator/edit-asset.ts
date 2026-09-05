@@ -273,7 +273,7 @@ async function specPatchEdit(
   const upload = await uploadToCloudinary(rendered.imageBuffer, { folder: `jobs/${job.id}/edits/verify` });
   const verification = await verifyPoster({
     imageUrl: upload.secureUrl,
-    rubricPrompt: buildVerificationRubric(planned.spec.adCopy, planned.spec.style),
+    rubricPrompt: buildVerificationRubric(planned.spec.adCopy, planned.spec.style, !!job.logoUrl),
     referenceImages: [
       { url: job.reference2Url, label: "The campaign's original reference design, for overall style fidelity." },
       { url: preEditPosterUrl, label: 'The poster BEFORE this edit - compare against it to confirm ONLY the requested change happened and nothing else moved.' },

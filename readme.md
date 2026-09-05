@@ -4,7 +4,7 @@
 
 **Four inputs in. A complete, multi-format ad campaign out.**
 
-Upload two reference images, a logo, and a text brief — get back a finished 1:1 poster
+Upload two reference images, an optional logo, and a text brief — get back a finished 1:1 poster
 plus 9:16, 4:5 and 1.91:1 variants, with an AI quality gate at every step and exactly
 one human approval in the middle.
 
@@ -38,7 +38,7 @@ one human approval in the middle.
 |:--|:--|
 | **Reference 1** | Subject / scenario direction — *what kind of photo this is* |
 | **Reference 2** | Layout reference — *what the finished ad looks like* (headline, CTA, trust badges). The only image analysed structurally. |
-| **Logo** | Brand logo, PNG or SVG |
+| **Logo** | Brand logo, PNG or SVG — **optional**; omit it and the logo stage is skipped at zero cost |
 | **Prompt** | Text brief: campaign theme, tone, copy direction (10–2000 chars) |
 
 ### Outputs

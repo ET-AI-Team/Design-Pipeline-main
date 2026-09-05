@@ -908,8 +908,13 @@ export interface AnalyzeReferenceStyleParams {
    *  to the real one logo_composite already placed. Attaching the real
    *  logo file here gives the model a concrete visual anchor for "this
    *  is the same brand identity" so it can recognize and exclude a
-   *  restated copy of it, instead of guessing from text content alone. */
-  logoUrl: string;
+   *  restated copy of it, instead of guessing from text content alone.
+   *
+   *  Absent when the job has no logo. The image is then omitted from the
+   *  request entirely rather than sent as an empty string - a blank URL
+   *  is not a "no logo" signal to a vision model, it is a malformed
+   *  request. */
+  logoUrl?: string;
   /** Real bug found live: this call used to re-derive the design's
    *  STRUCTURE (does a CTA exist, what does the bottom section actually
    *  contain) completely fresh on every single poster retry within the
@@ -1007,9 +1012,23 @@ Respond ONLY with JSON matching this exact shape: {"marginXRatio": number, "spac
 
   const images: VisionImageInput[] = [
     { url: params.referenceImageUrl, label: 'Reference - the design to match (content, hierarchy, colors, structure)' },
-    { url: params.currentCompositeUrl, label: 'Current image - the real photo+logo this design is being built onto right now; judge every size ratio against THIS canvas' },
-    { url: params.logoUrl, label: 'The actual brand logo file for this campaign - already placed on the final poster by a separate step. Use this ONLY to recognize when a design element elsewhere in the reference restates this same brand identity (see the catch-all exclusion above) - never treat this image as something to copy into the design yourself.' },
+    {
+      url: params.currentCompositeUrl,
+      label: params.logoUrl
+        ? 'Current image - the real photo+logo this design is being built onto right now; judge every size ratio against THIS canvas'
+        : 'Current image - the real photo this design is being built onto right now; judge every size ratio against THIS canvas',
+    },
   ];
+  // Only attached when the job actually has a logo. Passing '' here
+  // would send a malformed image URL to the vision API; and describing a
+  // brand mark that does not exist is how a model ends up inventing one.
+  if (params.logoUrl) {
+    images.push({
+      url: params.logoUrl,
+      label:
+        'The actual brand logo file for this campaign - already placed on the final poster by a separate step. Use this ONLY to recognize when a design element elsewhere in the reference restates this same brand identity (see the catch-all exclusion above) - never treat this image as something to copy into the design yourself.',
+    });
+  }
   // Low temperature: this is an "observe and describe what's actually
   // there" call, not a creative one - see callChatModel's doc comment
   // for the real run-to-run inconsistency this addresses.

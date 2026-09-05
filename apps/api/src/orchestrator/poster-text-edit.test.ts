@@ -564,6 +564,35 @@ describe('buildFullContextEditPrompt', () => {
     expect(prompt).not.toContain('the USER attached');
   });
 
+  // --- jobs with no logo ---
+  //
+  // The logo is optional. When absent, nothing in the prompt may claim
+  // one is present: this model has produced exactly what a prompt
+  // described, and telling it the photo "already has a brand logo
+  // correctly placed on it" when it does not is an invitation to invent
+  // one. Saying nothing is safer than either lying or naming the thing
+  // we do not want.
+  it('never claims a logo is present when there is none', () => {
+    const prompt = buildFullContextEditPrompt({ ...BASE_PARAMS, logoBox: null });
+    expect(prompt).not.toContain('already has a brand logo');
+  });
+
+  it('does not mention a logo AT ALL on a logo-free job', () => {
+    // Deliberately stronger than the check above. A leftover "do not
+    // alter the logo" rule is not merely redundant - it puts the word in
+    // front of a model that has previously rendered what it was told to
+    // avoid.
+    const prompt = buildFullContextEditPrompt({ ...BASE_PARAMS, logoBox: null });
+    expect(prompt.toLowerCase()).not.toContain('logo');
+  });
+
+  it('still names and protects the logo when one IS placed', () => {
+    // The guard above must not have silently disarmed the real case.
+    const prompt = buildFullContextEditPrompt(BASE_PARAMS); // logoBox is set
+    expect(prompt).toContain('already has a brand logo correctly placed on it');
+    expect(prompt).toContain('Do NOT alter the photograph or the logo');
+  });
+
   it('round 7 fix: omits the full-reference paragraph when includeFullReferenceImage is false, even with crops attached', () => {
     const prompt = buildFullContextEditPrompt({
       ...BASE_PARAMS,
@@ -723,6 +752,32 @@ describe('selectElementsToCrop', () => {
       elementOrder: [...STYLE.elementOrder, ...els.map((_, i) => `otherElements[${i}]`)],
     };
     expect(selectElementsToCrop(style).length).toBe(MAX_REFERENCE_CROPS);
+  });
+});
+
+describe('buildVerificationRubric - logo-free jobs', () => {
+  it('checks the photograph alone when the job has no logo', () => {
+    const rubric = buildVerificationRubric(COPY, STYLE, false);
+    expect(rubric).not.toContain('brand logo is covered');
+    expect(rubric).not.toContain('underlying photo and logo');
+  });
+
+  it('keeps the photoAndLogo field NAME even with no logo', () => {
+    // The 7 field keys are a stable contract - verifyPoster parses them
+    // and VerificationFields declares them. Renaming a key per-job would
+    // make the response shape vary by input.
+    const rubric = buildVerificationRubric(COPY, STYLE, false);
+    expect(rubric).toContain('"photoAndLogo"');
+    expect(rubric).toContain('7 numbered checks');
+  });
+
+  it('defaults to checking the logo, so existing callers are unchanged', () => {
+    // The parameter was ADDED, not substituted. Every pre-existing
+    // two-argument call must behave exactly as it did before.
+    const twoArg = buildVerificationRubric(COPY, STYLE);
+    const explicit = buildVerificationRubric(COPY, STYLE, true);
+    expect(twoArg).toBe(explicit);
+    expect(twoArg).toContain('brand logo is covered');
   });
 });
 

@@ -10,6 +10,9 @@ interface Props {
 
 interface Slot {
   key: 'reference1' | 'reference2' | 'logo';
+  /** Slots the API will accept a job without. Only the logo today - a
+   *  campaign may legitimately have no brand mark to place. */
+  optional?: boolean;
   label: string;
   short: string;
   accept: string;
@@ -31,7 +34,7 @@ const SLOTS: Slot[] = [
     accept: 'image/jpeg,image/png,image/webp',
     icon: ImagePlus,
   },
-  { key: 'logo', label: 'Logo', short: 'Logo', accept: 'image/png,image/svg+xml', icon: Shapes },
+  { key: 'logo', label: 'Logo', short: 'Logo', accept: 'image/png,image/svg+xml', icon: Shapes, optional: true },
 ];
 
 export function Composer({ onSubmitted }: Props) {
@@ -49,7 +52,10 @@ export function Composer({ onSubmitted }: Props) {
     mutationFn: async () => {
       const formData = new FormData();
       formData.append('prompt', prompt);
-      for (const slot of SLOTS) formData.append(slot.key, files[slot.key]!);
+      for (const slot of SLOTS) {
+        const file = files[slot.key];
+        if (file) formData.append(slot.key, file);
+      }
       const res = await fetch('/api/v1/jobs', { method: 'POST', body: formData });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error?.message ?? 'Submission failed');
@@ -73,7 +79,7 @@ export function Composer({ onSubmitted }: Props) {
       return;
     }
     for (const slot of SLOTS) {
-      if (!files[slot.key]) {
+      if (!slot.optional && !files[slot.key]) {
         setError(`${slot.label} is required.`);
         return;
       }
@@ -162,7 +168,7 @@ export function Composer({ onSubmitted }: Props) {
       </form>
 
       <p className="text-muted-foreground max-w-[420px] text-center text-[12.5px] leading-[1.5]">
-        Attach two references and a logo, then describe the campaign - the pipeline generates, QA's, and composites
+        Attach two references (a logo is optional), then describe the campaign - the pipeline generates, QA's, and composites
         the asset automatically.
       </p>
     </div>

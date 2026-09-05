@@ -63,6 +63,12 @@ for (const dimension of DIMENSION_NAMES) {
         pipelineContext: prompt || undefined,
       });
 
+      // A job with no logo has no lockup to preserve, so every logo
+      // clause below has to disappear - the fidelity rubric otherwise
+      // HARD-FAILS ("automatic fail, score 3 or lower") on the absence
+      // of something that was never placed.
+      const hasLogo = !!job.logoUrl;
+
       const result = await generateAndScore({
         jobId: job.id,
         prompt: planned.prompt,
@@ -73,7 +79,7 @@ for (const dimension of DIMENSION_NAMES) {
         // Switching later is a one-line change here, not a redesign.
         model: requireEnv('GEMINI_PRO_MODEL'),
         referenceImages: [
-          { url: inputAssetUrl, role: 'The approved poster - recompose its exact photo, logo, and text into the new aspect ratio, do not redesign it.' },
+          { url: inputAssetUrl, role: `The approved poster - recompose its exact photo, ${hasLogo ? 'logo, ' : ''}and text into the new aspect ratio, do not redesign it.` },
         ],
         cloudinaryFolder: `jobs/${job.id}/dimension-${dimension}`,
         // No distinct per-dimension "SCORING" JobStatus exists in the
@@ -102,7 +108,7 @@ for (const dimension of DIMENSION_NAMES) {
           {
             url: inputAssetUrl,
             label:
-              'The approved 1:1 poster this image is supposed to be a RECOMPOSITION of. Compare the submitted image against this one directly - same photo, same person, same logo, same text, same visual style, only the canvas shape should differ.',
+              `The approved 1:1 poster this image is supposed to be a RECOMPOSITION of. Compare the submitted image against this one directly - same photo, same person, ${hasLogo ? 'same logo, ' : ''}same text, same visual style, only the canvas shape should differ.`,
           },
         ],
         rubricPrompt: `Score this aspect-ratio recomposition out of 10. The second attached image is the approved source poster; the first is the recomposed version being judged. This was supposed to reshape that exact poster into a ${dimension} canvas - NOT redesign it, NOT regenerate it, NOT reinterpret it.
@@ -110,8 +116,7 @@ for (const dimension of DIMENSION_NAMES) {
 FIDELITY TO THE SOURCE - check each against the source poster, any single mismatch here is an automatic fail (score 3 or lower, and say exactly which one):
 - The photographed subject must be the SAME person: same face, same build, same clothing, same pose. A different-looking runner is a hard fail, however good the new one looks.
 - Any photographic background element (a monument, skyline, street) must stay PHOTOGRAPHIC and be the same one. Replacing a real photographed monument with a flat illustrated/vector/silhouette version of it is a hard fail.
-- The logo must be the identical lockup - same wording, same colors, same treatment. A re-drawn or re-colored logo is a hard fail.
-- Colors, typography and overall design language must match the source (e.g. a gradient headline must stay a gradient, not become flat).
+${hasLogo ? '- The logo must be the identical lockup - same wording, same colors, same treatment. A re-drawn or re-colored logo is a hard fail.\n' : ''}- Colors, typography and overall design language must match the source (e.g. a gradient headline must stay a gradient, not become flat).
 
 TEXT - compare word for word against the source poster:
 - Every text element in the source must appear in the recomposition EXACTLY ONCE. Any line rendered twice, any line missing, any invented text, or any altered spelling/casing is an automatic fail: score 3 or lower and quote the offending text.
