@@ -16,6 +16,8 @@ output/
 api-contracts.md
 docs/
 ui-update-prompt.md
+ai-studio-optional-logo-prompt.md
+all-info.md
 
 # pm2 runtime logs (the directory itself is kept via logs/.gitkeep so
 # pm2 has somewhere to write on a fresh clone).
